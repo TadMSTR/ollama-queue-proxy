@@ -128,7 +128,11 @@ class PriorityQueueManager:
                         pass
 
                 if item is None:
-                    # Check if all queues truly empty
+                    # Check if all queues truly empty before clearing the event.
+                    # Known benign race: a new item may arrive between get_nowait()
+                    # missing it and clear() here. The item won't be picked up until
+                    # the next enqueue() sets the event again — a brief extra wait,
+                    # not a loss. Every enqueue() always sets _has_items.
                     if all(q.empty() for q in self._queues.values()):
                         self._has_items.clear()
                     continue

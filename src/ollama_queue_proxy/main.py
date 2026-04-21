@@ -13,7 +13,7 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse
 
 from .auth import AuthManager
 from .config import Config, load_config
@@ -249,15 +249,10 @@ async def proxy_handler(request: Request, path: str):
         )
         cs["processed"] = cs.get("processed", 0) + 1
 
-    # Inject queue timing headers
-    if isinstance(response, (JSONResponse,)):
-        response.headers["X-Queue-Wait-Time"] = str(wait_ms)
-        if waited:
-            response.headers["X-Queue-Position"] = str(position)
-    elif isinstance(response, StreamingResponse):
-        response.headers["X-Queue-Wait-Time"] = str(wait_ms)
-        if waited:
-            response.headers["X-Queue-Position"] = str(position)
+    # Inject queue timing headers (both JSONResponse and StreamingResponse inherit Response)
+    response.headers["X-Queue-Wait-Time"] = str(wait_ms)
+    if waited:
+        response.headers["X-Queue-Position"] = str(position)
 
     return response
 
