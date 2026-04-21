@@ -1,0 +1,8 @@
+[extend]
+useDefault = true
+
+[[rules]]
+id = "oqp-api-key"
+description = "ollama-queue-proxy API key in config"
+regex = '''key:\s*["']?[A-Za-z0-9_\-]{20,}["']?'''
+path = '''config\.yml'''

@@ -1,0 +1,25 @@
+services:
+  ollama-queue-proxy:
+    image: ghcr.io/tadmstr/ollama-queue-proxy:latest
+    container_name: ollama-queue-proxy
+    user: '1000:1000'
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    ports:
+      # Bind to localhost only — do not expose to LAN without setting auth.enabled: true
+      - "127.0.0.1:11435:11435"
+    volumes:
+      - ./config.yml:/app/config.yml:ro
+    environment:
+      - OQP_CONFIG=/app/config.yml
+      # Override individual values without editing config.yml:
+      # - OQP_OLLAMA__HOSTS__0__URL=http://ollama:11434
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"

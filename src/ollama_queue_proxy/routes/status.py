@@ -1,0 +1,171 @@
+"""GET /queue/status and GET /health endpoints."""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING
+
+from fastapi import APIRouter, Request
+from fastapi.responses import PlainTextResponse
+
+if TYPE_CHECKING:
+    from ..main import AppState
+
+router = APIRouter()
+
+
+@router.get("/health")
+async def health():
+    """Lightweight liveness probe — no auth required, no upstream check."""
+    return {"status": "ok"}
+
+
+@router.get("/queue/status")
+async def queue_status(request: Request):
+    state: AppState = request.app.state.oqp
+
+    # Auth check (same as any other endpoint when enabled)
+    _, err = await state.auth_manager.authenticate(request)
+    if err:
+        return err
+
+    q_mgr = state.queue_manager
+    depths = q_mgr.queue_depths()
+    stats = q_mgr.stats()
+    tier_cfgs = {
+        "high": state.config.queue.high,
+        "normal": state.config.queue.normal,
+        "low": state.config.queue.low,
+    }
+
+    queue_data = {}
+    for tier in ("high", "normal", "low"):
+        s = stats[tier]
+        queue_data[tier] = {
+            "depth": depths[tier],
+            "max_depth": tier_cfgs[tier].max_depth,
+            "processed": s.processed,
+            "rejected": s.rejected,
+            "expired": s.expired,
+        }
+
+    hosts_data = []
+    for host in state.host_manager.hosts:
+        hosts_data.append({
+            "name": host.name,
+            "url": host.url,
+            "healthy": host.healthy,
+            "models": host.models,
+            "last_checked": host.last_checked.isoformat() if host.last_checked else None,
+            "requests_handled": host.requests_handled,
+            "failures": host.failures,
+        })
+
+    uptime = (datetime.now(timezone.utc) - state.start_time).total_seconds()
+
+    # Client stats
+    clients_data = {}
+    for client_id, cs in state.client_stats.items():
+        clients_data[client_id] = {
+            "description": cs.get("description"),
+            "processed": cs.get("processed", 0),
+            "rejected": cs.get("rejected", 0),
+        }
+
+    security_data = {
+        "auth_enabled": state.config.auth.enabled,
+        "model_management_allowed": state.config.proxy.allow_model_management,
+        "active_keys": len(state.config.auth.keys),
+    }
+
+    return {
+        "status": "ok",
+        "uptime_seconds": int(uptime),
+        "queue": queue_data,
+        "concurrency": {
+            "active": q_mgr.active_count(),
+            "max": state.config.proxy.max_concurrent,
+        },
+        "hosts": hosts_data,
+        "clients": clients_data,
+        "security": security_data,
+    }
+
+
+@router.get("/metrics")
+async def metrics(request: Request):
+    """Prometheus text exposition format."""
+    state: AppState = request.app.state.oqp
+
+    # Auth mirrors /queue/status
+    _, err = await state.auth_manager.authenticate(request)
+    if err:
+        return err
+
+    q_mgr = state.queue_manager
+    depths = q_mgr.queue_depths()
+    stats = q_mgr.stats()
+    uptime = (datetime.now(timezone.utc) - state.start_time).total_seconds()
+
+    lines = [
+        "# HELP oqp_queue_depth Current number of requests waiting in queue",
+        "# TYPE oqp_queue_depth gauge",
+    ]
+    for tier in ("high", "normal", "low"):
+        lines.append(f'oqp_queue_depth{{tier="{tier}"}} {depths[tier]}')
+
+    lines += [
+        "# HELP oqp_queue_processed_total Total requests dispatched from queue",
+        "# TYPE oqp_queue_processed_total counter",
+    ]
+    for tier in ("high", "normal", "low"):
+        lines.append(f'oqp_queue_processed_total{{tier="{tier}"}} {stats[tier].processed}')
+
+    lines += [
+        "# HELP oqp_queue_rejected_total Requests rejected due to full queue",
+        "# TYPE oqp_queue_rejected_total counter",
+    ]
+    for tier in ("high", "normal", "low"):
+        lines.append(f'oqp_queue_rejected_total{{tier="{tier}"}} {stats[tier].rejected}')
+
+    lines += [
+        "# HELP oqp_queue_expired_total Requests dropped due to max_wait timeout",
+        "# TYPE oqp_queue_expired_total counter",
+    ]
+    for tier in ("high", "normal", "low"):
+        lines.append(f'oqp_queue_expired_total{{tier="{tier}"}} {stats[tier].expired}')
+
+    lines += [
+        "# HELP oqp_concurrency_active Current active upstream requests",
+        "# TYPE oqp_concurrency_active gauge",
+        f"oqp_concurrency_active {q_mgr.active_count()}",
+    ]
+
+    lines += [
+        "# HELP oqp_host_healthy Whether the host is currently healthy (1=healthy, 0=unhealthy)",
+        "# TYPE oqp_host_healthy gauge",
+    ]
+    for host in state.host_manager.hosts:
+        lines.append(f'oqp_host_healthy{{name="{host.name}"}} {1 if host.healthy else 0}')
+
+    lines += [
+        "# HELP oqp_host_requests_total Total requests handled by host",
+        "# TYPE oqp_host_requests_total counter",
+    ]
+    for host in state.host_manager.hosts:
+        lines.append(f'oqp_host_requests_total{{name="{host.name}"}} {host.requests_handled}')
+
+    lines += [
+        "# HELP oqp_host_failures_total Total upstream failures for host",
+        "# TYPE oqp_host_failures_total counter",
+    ]
+    for host in state.host_manager.hosts:
+        lines.append(f'oqp_host_failures_total{{name="{host.name}"}} {host.failures}')
+
+    lines += [
+        "# HELP oqp_uptime_seconds Proxy uptime in seconds since last start",
+        "# TYPE oqp_uptime_seconds gauge",
+        f"oqp_uptime_seconds {int(uptime)}",
+    ]
+
+    return PlainTextResponse("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")

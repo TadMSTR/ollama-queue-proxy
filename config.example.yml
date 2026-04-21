@@ -1,0 +1,81 @@
+# ollama-queue-proxy configuration
+#
+# Copy this file to config.yml and fill in your values.
+# config.yml is in .gitignore — never commit it with real keys.
+#
+# WARNING: Default config has NO authentication.
+# If exposing beyond localhost, set auth.enabled: true and configure API keys.
+# The docker-compose.yml binds to 127.0.0.1 for this reason.
+#
+# All values can be overridden via environment variables using OQP_ prefix
+# and __ for nesting. Examples:
+#   OQP_PROXY__PORT=11435
+#   OQP_OLLAMA__HOSTS__0__URL=http://ollama:11434
+#   OQP_AUTH__ENABLED=true
+
+proxy:
+  host: "0.0.0.0"
+  port: 11435
+  max_concurrent: 2          # concurrent requests dispatched to Ollama
+  allow_model_management: false  # block /api/pull, /api/push, /api/delete, /api/create, /api/copy
+  drain_timeout: 30          # seconds to wait for in-flight requests on shutdown
+  max_request_body_mb: 50    # reject bodies larger than this before buffering
+
+ollama:
+  hosts:
+    - url: "http://ollama-primary:11434"
+      name: "primary"
+    # - url: "http://ollama-fallback:11434"
+    #   name: "fallback"
+  health_check_interval: 30  # seconds between recovery checks on unhealthy hosts
+  request_timeout: 300       # seconds before upstream timeout
+
+queue:
+  high:
+    max_depth: 50
+    max_wait: 120            # seconds before stale request is dropped
+    high_watermark_pct: 80  # fire queue.high_watermark webhook at this % of max_depth
+  normal:
+    max_depth: 100
+    max_wait: 300
+    high_watermark_pct: 80
+  low:
+    max_depth: 200
+    max_wait: 600
+    high_watermark_pct: 80
+  overflow_status_code: 503  # 503 or 429
+
+webhooks:
+  enabled: false
+  url: ""                    # POST target for queue events; fire-and-forget (5s timeout)
+  # Note: webhook payloads include client_id. If using a third-party target, be aware
+  # that client identifiers will be shared externally.
+  events:
+    - queue.full
+    - queue.high_watermark
+    - queue.drained
+    - host.unhealthy
+    - host.recovered
+
+auth:
+  enabled: false             # set true to require API keys on all requests
+  # WARNING: auth.enabled: true with no keys configured is a fatal startup error.
+  keys: []
+  # Example keys:
+  # - key: "${ADMIN_API_KEY}"       # or hardcode, but use env vars for real deployments
+  #   client_id: "admin"
+  #   description: "Admin key — full access"
+  #   max_priority: high
+  #   management: true              # required to call /queue/pause, /drain, /flush
+  # - key: "${MEMSEARCH_API_KEY}"
+  #   client_id: "memsearch-watch"
+  #   description: "Background embedding re-index jobs"
+  #   max_priority: low
+  #   management: false
+  rate_limit:
+    max_failures: 10         # consecutive auth failures per IP before 429
+    window_seconds: 60       # rolling window for failure counting
+
+logging:
+  level: "info"
+  format: "json"             # json or text
