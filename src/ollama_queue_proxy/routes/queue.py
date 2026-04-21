@@ -12,6 +12,21 @@ if TYPE_CHECKING:
 
 router = APIRouter()
 
+_VALID_TIERS = {"high", "normal", "low"}
+
+
+def _validate_tier(tier: str | None, request_id: str) -> JSONResponse | None:
+    """Return error response if tier is provided but invalid."""
+    if tier is not None and tier not in _VALID_TIERS:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": f"invalid tier: {tier!r} (must be high, normal, or low)",
+                "request_id": request_id,
+            },
+        )
+    return None
+
 
 async def _require_management(request: Request) -> JSONResponse | None:
     """Check that the request has a management-capable key (or auth is disabled)."""
@@ -34,6 +49,10 @@ async def _require_management(request: Request) -> JSONResponse | None:
 
 @router.post("/queue/pause")
 async def queue_pause(request: Request, tier: str | None = None):
+    request_id = getattr(request.state, "request_id", "unknown")
+    tier_err = _validate_tier(tier, request_id)
+    if tier_err:
+        return tier_err
     err = await _require_management(request)
     if err:
         return err
@@ -44,6 +63,10 @@ async def queue_pause(request: Request, tier: str | None = None):
 
 @router.post("/queue/resume")
 async def queue_resume(request: Request, tier: str | None = None):
+    request_id = getattr(request.state, "request_id", "unknown")
+    tier_err = _validate_tier(tier, request_id)
+    if tier_err:
+        return tier_err
     err = await _require_management(request)
     if err:
         return err
@@ -64,6 +87,10 @@ async def queue_drain(request: Request):
 
 @router.post("/queue/flush")
 async def queue_flush(request: Request, tier: str | None = None):
+    request_id = getattr(request.state, "request_id", "unknown")
+    tier_err = _validate_tier(tier, request_id)
+    if tier_err:
+        return tier_err
     err = await _require_management(request)
     if err:
         return err

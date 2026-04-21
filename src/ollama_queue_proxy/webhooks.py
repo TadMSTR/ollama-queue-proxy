@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import logging
+import socket
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
@@ -19,15 +20,28 @@ _PRIVATE_NETWORKS = [
     ipaddress.ip_network("172.16.0.0/12"),
     ipaddress.ip_network("192.168.0.0/16"),
     ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("169.254.0.0/16"),
     ipaddress.ip_network("::1/128"),
     ipaddress.ip_network("fc00::/7"),
+    ipaddress.ip_network("fe80::/10"),
 ]
+
+
+def _check_private(addr: ipaddress.IPv4Address | ipaddress.IPv6Address, label: str) -> None:
+    """Raise ValueError if addr falls within a private/loopback/link-local network."""
+    for net in _PRIVATE_NETWORKS:
+        if addr in net:
+            raise ValueError(
+                f"Webhook URL resolves to a private/loopback address "
+                f"({label} -> {addr}). This is an SSRF risk. Use a public URL."
+            )
 
 
 def validate_webhook_url(url: str) -> None:
     """
     Validate webhook URL at startup.
-    Rejects RFC 1918 addresses, loopback, and non-http(s) schemes.
+    Resolves hostnames to IP addresses and rejects RFC 1918, loopback,
+    link-local (169.254/fe80), and non-http(s) schemes.
     Raises ValueError with a descriptive message if invalid.
     """
     if not url:
@@ -40,18 +54,27 @@ def validate_webhook_url(url: str) -> None:
     host = parsed.hostname
     if not host:
         raise ValueError("Webhook URL has no hostname")
+
+    # Try parsing as IP literal first
     try:
         addr = ipaddress.ip_address(host)
-        for net in _PRIVATE_NETWORKS:
-            if addr in net:
-                raise ValueError(
-                    f"Webhook URL points to a private/loopback address ({host}). "
-                    "This is an SSRF risk. Use a public URL."
-                )
+        _check_private(addr, host)
+        return
     except ValueError as e:
-        # ip_address() raises ValueError for hostnames — that's fine, pass through
         if "private" in str(e) or "SSRF" in str(e):
             raise
+        # Not an IP literal — resolve hostname below
+
+    # Resolve hostname to IP(s) and check all results
+    try:
+        results = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+    except socket.gaierror as e:
+        raise ValueError(f"Webhook URL hostname cannot be resolved: {host} ({e})")
+    if not results:
+        raise ValueError(f"Webhook URL hostname resolved to no addresses: {host}")
+    for family, _, _, _, sockaddr in results:
+        addr = ipaddress.ip_address(sockaddr[0])
+        _check_private(addr, host)
 
 
 class WebhookManager:
