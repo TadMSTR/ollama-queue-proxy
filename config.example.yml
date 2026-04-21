@@ -16,7 +16,10 @@
 proxy:
   host: "0.0.0.0"
   port: 11435
-  max_concurrent: 2          # concurrent requests dispatched to Ollama
+  max_concurrent: 2          # concurrent requests dispatched to Ollama at once.
+                             # Set this to match Ollama's OLLAMA_NUM_PARALLEL (default 1 in Ollama;
+                             # the proxy default of 2 assumes you've set OLLAMA_NUM_PARALLEL ≥ 2).
+                             # Higher values increase throughput but also GPU memory pressure.
   allow_model_management: false  # block /api/pull, /api/push, /api/delete, /api/create, /api/copy
   drain_timeout: 30          # seconds to wait for in-flight requests on shutdown
   max_request_body_mb: 50    # reject bodies larger than this before buffering

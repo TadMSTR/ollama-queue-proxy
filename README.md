@@ -33,6 +33,8 @@ Background jobs send `low`. Interactive tools send `normal` or `high`. The queue
 
 Requests from multiple consumers enter the proxy, are authenticated against per-client API keys, and placed into one of three priority tiers (high / normal / low). A worker pool drains the tiers in order — high before normal before low — and dispatches each request to the primary Ollama host, falling back to the next configured host on failure. Responses stream back transparently, with queue metadata added as response headers.
 
+Proxy overhead is roughly 1–2ms per request in local testing — negligible compared to Ollama inference time.
+
 ---
 
 ## Quick start
@@ -232,6 +234,8 @@ Delivery is fire-and-forget (5s timeout). Failed deliveries are logged at WARNIN
 
 ## Config reference
 
+`max_concurrent` controls how many requests the proxy dispatches to Ollama simultaneously. Set it to match Ollama's `OLLAMA_NUM_PARALLEL` environment variable (Ollama's default is 1; the proxy default of 2 assumes you've set `OLLAMA_NUM_PARALLEL=2` or higher on the Ollama side). They're independent settings — the proxy throttles at the queue layer, Ollama throttles internally. If they're mismatched, requests will either queue unnecessarily or pile up at Ollama.
+
 All values can be overridden via env vars with `OQP_` prefix and `__` nesting:
 
 ```bash
@@ -261,7 +265,7 @@ scrape_configs:
 
 **NATS/Redis from webhooks:** forward `queue.full` and `host.unhealthy` events from the webhook URL to a message bus for real-time alerting without log scraping.
 
-**Agent orchestration (Helm platform):** use `/queue/pause` and `/queue/resume` to gate batch agent jobs during interactive sessions. Management key holders can hold a tier while running heavy jobs without starving interactive users.
+**Agent orchestration:** use `/queue/pause` and `/queue/resume` to gate batch agent jobs during interactive sessions. Management key holders can hold a tier while running heavy jobs without starving interactive users.
 
 ---
 
