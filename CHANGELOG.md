@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-04-21
+
 ### Fixed
 
 - Streaming response detection now handles `application/x-ndjson` content-type — Ollama uses this
