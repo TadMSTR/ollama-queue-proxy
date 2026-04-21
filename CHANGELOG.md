@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.1.1] - 2026-04-21
+
+### Fixed
+
+- SSRF webhook validation bypass via hostnames — `validate_webhook_url()` previously only checked
+  raw IP literals; hostnames (e.g., `http://localhost/hook`) bypassed the blocklist. Now resolves
+  hostnames to IP via `socket.getaddrinfo()` before blocklist comparison. Added `169.254.0.0/16`
+  (link-local / cloud metadata) and `fe80::/10` to `_PRIVATE_NETWORKS`. (`webhooks.py`)
+- Dockerfile missing `USER` instruction — container now runs as `appuser` (non-root) by default,
+  consistent with the compose `user: 1000:1000` override. Safe for standalone `docker run`.
+- Queue management tier parameter now validated — `?tier=bogus` returns HTTP 400 instead of
+  unhandled `KeyError` → 500. Accepts `high`, `normal`, `low`. (`routes/queue.py`)
+- CI action versions updated — `actions/checkout` → v6.0.2, `actions/setup-python` → v6.2.0
+  with correct SHA pins. (`.github/workflows/ci.yml`)
+
 ## [0.1.0] - 2026-04-21
 
 ### Added
