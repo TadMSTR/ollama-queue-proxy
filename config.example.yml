@@ -23,6 +23,11 @@ proxy:
 
 ollama:
   hosts:
+    # If Ollama is running natively (not in Docker):
+    #   Linux:       http://172.17.0.1:11434
+    #   Mac/Windows: http://host.docker.internal:11434
+    # If Ollama is in the same Docker Compose stack, use its service name:
+    #   http://ollama:11434
     - url: "http://ollama-primary:11434"
       name: "primary"
     # - url: "http://ollama-fallback:11434"

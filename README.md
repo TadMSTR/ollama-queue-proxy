@@ -31,30 +31,21 @@ Background jobs send `low`. Interactive tools send `normal` or `high`. The queue
 
 ## How it works
 
-![Request flow diagram](docs/request-flow.drawio.png)
-
 Requests from multiple consumers enter the proxy, are authenticated against per-client API keys, and placed into one of three priority tiers (high / normal / low). A worker pool drains the tiers in order — high before normal before low — and dispatches each request to the primary Ollama host, falling back to the next configured host on failure. Responses stream back transparently, with queue metadata added as response headers.
 
 ---
 
 ## Quick start
 
-```yaml
-# docker-compose.yml
-services:
-  ollama-queue-proxy:
-    image: ghcr.io/tadmstr/ollama-queue-proxy:latest
-    ports:
-      - "127.0.0.1:11435:11435"
-    volumes:
-      - ./config.yml:/app/config.yml:ro
-```
-
 ```bash
+git clone https://github.com/TadMSTR/ollama-queue-proxy
+cd ollama-queue-proxy
 cp config.example.yml config.yml
-# Edit config.yml — set your Ollama host URL
+# Edit config.yml — set your Ollama host URL (see comment in file)
 docker compose up -d
 ```
+
+> **If Ollama runs natively (not in a container):** set the host URL to `http://host.docker.internal:11434` (Mac/Windows) or `http://172.17.0.1:11434` (Linux).
 
 Then point your consumers at `http://localhost:11435` instead of `http://localhost:11434`.
 
@@ -176,7 +167,7 @@ ollama:
 
 On connection failure or timeout, the proxy marks the host unhealthy, logs it, and retries on the next host. The response includes `X-Failover-Host` showing which host handled it.
 
-**Model-aware routing:** if a request specifies a model that isn't on the primary host, the proxy skips to a host that has it.
+**Model-aware routing:** if a request specifies a model that isn't on the primary host, the proxy skips to a host that has it. The proxy auto-discovers each host's model inventory via `/api/tags` at startup and on each health-check recovery — no manual model-to-host mapping is required.
 
 **Important:** failover only applies before any response bytes are sent. If a streaming response has already started, a mid-stream failure returns a connection error to the client — transparent retry isn't possible once streaming begins.
 
@@ -291,6 +282,25 @@ These are intentionally out of scope. Community contributions welcome:
 ## Client compatibility
 
 Any Ollama client works unchanged. The proxy forwards `GET /api/version`, `GET /api/tags`, streaming chat, streaming generate, and all other endpoints transparently. Clients that probe these endpoints on startup (Open WebUI, LangChain, Continue.dev) will connect successfully.
+
+---
+
+## Running without Docker
+
+```bash
+pip install git+https://github.com/TadMSTR/ollama-queue-proxy
+cp config.example.yml config.yml
+# Edit config.yml
+ollama-queue-proxy
+```
+
+Or with an environment variable instead of a config file:
+
+```bash
+OQP_OLLAMA__HOSTS__0__URL=http://localhost:11434 ollama-queue-proxy
+```
+
+Python 3.11+ required.
 
 ---
 
