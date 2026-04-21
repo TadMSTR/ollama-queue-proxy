@@ -37,11 +37,12 @@ def _check_private(addr: ipaddress.IPv4Address | ipaddress.IPv6Address, label: s
             )
 
 
-def validate_webhook_url(url: str) -> None:
+def validate_webhook_url(url: str, allowed_hosts: list[str] | None = None) -> None:
     """
     Validate webhook URL at startup.
     Resolves hostnames to IP addresses and rejects RFC 1918, loopback,
     link-local (169.254/fe80), and non-http(s) schemes.
+    Hosts in allowed_hosts bypass the private-IP check (for internal services).
     Raises ValueError with a descriptive message if invalid.
     """
     if not url:
@@ -54,6 +55,11 @@ def validate_webhook_url(url: str) -> None:
     host = parsed.hostname
     if not host:
         raise ValueError("Webhook URL has no hostname")
+
+    # Allowlisted hosts bypass the private-IP SSRF check.
+    if allowed_hosts and host in allowed_hosts:
+        logger.info("webhook.ssrf_check_bypassed host=%s (in allowed_hosts)", host)
+        return
 
     # Try parsing as IP literal first
     try:

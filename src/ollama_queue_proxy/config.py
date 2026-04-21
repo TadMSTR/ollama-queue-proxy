@@ -44,6 +44,7 @@ class WebhookConfig(BaseModel):
         "host.unhealthy",
         "host.recovered",
     ]
+    allowed_hosts: list[str] = []  # hostnames exempt from SSRF check (for internal ntfy etc.)
 
 
 class ApiKeyConfig(BaseModel):

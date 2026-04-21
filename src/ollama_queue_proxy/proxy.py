@@ -170,11 +170,15 @@ async def dispatch_request(
             )
             host.requests_handled += 1
 
-            # Check if this is a streaming response
+            # Check if this is a streaming response.
+            # Ollama uses application/x-ndjson for streaming generate/chat,
+            # text/event-stream for some endpoints, and application/json (chunked)
+            # for others. Treat any chunked transfer or ndjson content as streaming.
             content_type = resp.headers.get("content-type", "")
-            is_streaming = "text/event-stream" in content_type or (
-                resp.headers.get("transfer-encoding", "").lower() == "chunked"
-                and "application/json" in content_type
+            is_streaming = (
+                "text/event-stream" in content_type
+                or "application/x-ndjson" in content_type
+                or resp.headers.get("transfer-encoding", "").lower() == "chunked"
             )
 
             response_headers = {

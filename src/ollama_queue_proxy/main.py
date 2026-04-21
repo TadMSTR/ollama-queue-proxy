@@ -68,7 +68,7 @@ async def lifespan(app: FastAPI):
     # Validate webhook URL for SSRF at startup
     if config.webhooks.enabled and config.webhooks.url:
         try:
-            validate_webhook_url(config.webhooks.url)
+            validate_webhook_url(config.webhooks.url, config.webhooks.allowed_hosts)
         except ValueError as e:
             import sys
             print(f"FATAL: {e}", file=sys.stderr)
