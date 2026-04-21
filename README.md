@@ -31,6 +31,8 @@ Background jobs send `low`. Interactive tools send `normal` or `high`. The queue
 
 ## How it works
 
+![Request flow diagram](docs/request-flow.drawio.png)
+
 Requests from multiple consumers enter the proxy, are authenticated against per-client API keys, and placed into one of three priority tiers (high / normal / low). A worker pool drains the tiers in order — high before normal before low — and dispatches each request to the primary Ollama host, falling back to the next configured host on failure. Responses stream back transparently, with queue metadata added as response headers.
 
 Proxy overhead is roughly 1–2ms per request in local testing — negligible compared to Ollama inference time.
