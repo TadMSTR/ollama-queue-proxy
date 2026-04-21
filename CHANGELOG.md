@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Streaming response detection now handles `application/x-ndjson` content-type — Ollama uses this
+  for `/api/generate` and `/api/chat` streaming responses; the previous check only matched
+  `text/event-stream` and `application/json` (chunked), causing streaming responses to be
+  returned as a null JSONResponse body. (`proxy.py`)
+- Webhook SSRF check now supports an `allowed_hosts` list in config — enables webhook delivery
+  to internal hostnames (e.g., ntfy on a LAN IP) without disabling the SSRF guard entirely.
+  Host bypass is logged at INFO level. (`config.py`, `webhooks.py`, `main.py`)
+
 ## [0.1.1] - 2026-04-21
 
 ### Fixed
