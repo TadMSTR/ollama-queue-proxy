@@ -51,7 +51,7 @@ Background jobs send `low`. Interactive tools send `normal` or `high`. The queue
 ```mermaid
 flowchart TD
     subgraph Entry["Entry Points"]
-        C1["Consumers\n(Open WebUI, LangChain, agents)\nport 11435"]
+        C1["Consumers\n(LibreChat, LangChain, agents)\nport 11435"]
         C2["No-auth clients\nport 11436 / 11437"]
     end
 
