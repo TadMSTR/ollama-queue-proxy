@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-## [0.2.0] - Unreleased
+## [0.2.0] - 2026-04-22
 
 ### Added
 
@@ -19,6 +19,12 @@
 
 - Version skew corrected: `__init__.py` (was 0.1.0) and `pyproject.toml` (was 0.1.1) both updated to match the `v0.1.2` release tag; all three now advance together to 0.2.0.
 - `serve()` refactored to launch N+1 uvicorn `Server` instances via `asyncio.gather` (main port + one per injection listener). Graceful shutdown across all listeners on SIGTERM/SIGINT.
+- `Dockerfile` `CMD` switched from bare `uvicorn` invocation to the `ollama-queue-proxy` console script so `main:run()` actually launches the injection listener orchestration in containerized deployments.
+
+### Security
+
+- `client_injection.listeners[].bind` is now validated against `allow_public_injection`: a non-loopback bind without `allow_public_injection: true` fails config validation at startup. The non-loopback warning also fires whenever a listener binds off-loopback, regardless of `auth.enabled`, because injection ports bypass Bearer auth by design.
+- `/metrics` label values (`model`, `host`, `client`, `endpoint`, `reason`, `kind`) are now escaped before interpolation into the Prometheus exposition format, preventing label-injection via client-supplied model names.
 
 ### Notes
 

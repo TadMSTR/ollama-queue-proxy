@@ -1,6 +1,6 @@
 [project]
 name = "ollama-queue-proxy"
-version = "0.2.0.dev0"
+version = "0.2.0"
 description = "Drop-in HTTP proxy for Ollama with priority queuing, per-client auth, and model-aware failover"
 readme = "README.md"
 license = { text = "MIT" }
