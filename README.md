@@ -4,6 +4,7 @@
 [![CI](https://github.com/TadMSTR/ollama-queue-proxy/actions/workflows/ci.yml/badge.svg)](https://github.com/TadMSTR/ollama-queue-proxy/actions/workflows/ci.yml)
 [![Python versions](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![SafeSkill 93/100](https://img.shields.io/badge/SafeSkill-93%2F100_Verified%20Safe-brightgreen)](https://safeskill.dev/scan/tadmstr-ollama-queue-proxy)
 
 A **smart pool manager for Ollama** — one endpoint that authenticates, queues, routes, caches, and rate-limits across a whole Ollama fleet. Drop-in compatible: one config change in your consumers:
 
