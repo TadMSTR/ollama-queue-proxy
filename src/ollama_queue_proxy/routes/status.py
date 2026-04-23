@@ -162,6 +162,39 @@ async def metrics(request: Request):
     for host in state.host_manager.hosts:
         lines.append(f'oqp_host_failures_total{{name="{host.name}"}} {host.failures}')
 
+    # Embedding cache metrics
+    if state.embedding_cache is not None:
+        from ..cache import hits as cache_hits, misses as cache_misses, errors as cache_errors
+
+        lines += [
+            "# HELP oqp_embedding_cache_hits_total Embedding cache hits",
+            "# TYPE oqp_embedding_cache_hits_total counter",
+        ]
+        for label, count in cache_hits.items():
+            client_id, model, endpoint = label.split(",", 2)
+            lines.append(
+                f'oqp_embedding_cache_hits_total{{client="{client_id}",model="{model}",'
+                f'endpoint="{endpoint}"}} {count}'
+            )
+
+        lines += [
+            "# HELP oqp_embedding_cache_misses_total Embedding cache misses",
+            "# TYPE oqp_embedding_cache_misses_total counter",
+        ]
+        for label, count in cache_misses.items():
+            client_id, model, endpoint = label.split(",", 2)
+            lines.append(
+                f'oqp_embedding_cache_misses_total{{client="{client_id}",model="{model}",'
+                f'endpoint="{endpoint}"}} {count}'
+            )
+
+        lines += [
+            "# HELP oqp_embedding_cache_errors_total Embedding cache RESP errors by kind",
+            "# TYPE oqp_embedding_cache_errors_total counter",
+        ]
+        for kind, count in cache_errors.items():
+            lines.append(f'oqp_embedding_cache_errors_total{{kind="{kind}"}} {count}')
+
     # Routing table metrics (model_aware strategy only)
     if state.routing_table is not None:
         rt = state.routing_table

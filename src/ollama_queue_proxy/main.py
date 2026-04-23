@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import logging.config
 import time
@@ -16,6 +17,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from .auth import AuthManager
+from .cache import EmbeddingCache
 from .config import Config, load_config
 from .hosts import HostManager
 from .middleware import RequestContextMiddleware, get_client_id, parse_priority
@@ -38,6 +40,7 @@ class AppState:
     webhook_manager: WebhookManager
     http_client: httpx.AsyncClient
     routing_table: RoutingTable | None = None
+    embedding_cache: EmbeddingCache | None = None
     start_time: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     client_stats: dict[str, dict[str, Any]] = field(default_factory=dict)
     shutting_down: bool = False
@@ -107,6 +110,12 @@ async def lifespan(app: FastAPI):
         routing_table = RoutingTable(config.ollama, config.routing, http_client)
         await routing_table.startup_probe()
 
+    # Build embedding cache if enabled
+    embedding_cache: EmbeddingCache | None = None
+    if config.embedding_cache.enabled:
+        embedding_cache = EmbeddingCache(config.embedding_cache)
+        await embedding_cache.startup()
+
     state = AppState(
         config=config,
         auth_manager=auth_manager,
@@ -115,6 +124,7 @@ async def lifespan(app: FastAPI):
         webhook_manager=webhook_manager,
         http_client=http_client,
         routing_table=routing_table,
+        embedding_cache=embedding_cache,
         client_stats=client_stats,
     )
     app.state.oqp = state
@@ -151,6 +161,8 @@ async def lifespan(app: FastAPI):
     await host_manager.stop()
     if routing_table:
         await routing_table.stop()
+    if embedding_cache:
+        await embedding_cache.close()
     await http_client.aclose()
     set_shared_state(None)
     logger.info("shutdown: complete")
@@ -177,12 +189,47 @@ async def _enqueue_request(
     """
     Buffer the request body, enqueue it, and await dispatch. Used by both the main
     proxy handler and injection port handlers to share queue/worker logic.
+
+    For embedding endpoints, checks the cache before enqueueing. Cache hits bypass
+    the queue entirely and return immediately.
     """
+    from .cache import CACHEABLE_PATHS
+    from .proxy import extract_model
+
     request_id = getattr(request.state, "request_id", "unknown")
 
     body, body_err = await read_body(request, state.config.proxy.max_request_body_mb)
     if body_err:
         return body_err
+
+    # Embedding cache — parsed body and model extracted once, reused for set on miss
+    path = request.url.path
+    cache_body_data: dict | None = None
+    cache_model: str = ""
+
+    if state.embedding_cache is not None and path in CACHEABLE_PATHS:
+        try:
+            parsed = json.loads(body) if body else {}
+        except (json.JSONDecodeError, ValueError):
+            parsed = {}
+        if isinstance(parsed, dict):
+            cache_body_data = parsed
+            cache_model = extract_model(body) or ""
+            cached = await state.embedding_cache.get(
+                path, cache_body_data, cache_model, client_id
+            )
+            if cached is not None:
+                # Cache hit — still track stats, skip queue
+                if client_id:
+                    cs = state.client_stats.setdefault(
+                        client_id, {"description": None, "processed": 0, "rejected": 0}
+                    )
+                    cs["processed"] = cs.get("processed", 0) + 1
+                return JSONResponse(
+                    status_code=200,
+                    content=json.loads(cached),
+                    headers={"X-Cache": "HIT"},
+                )
 
     enqueue_time = time.monotonic()
     future: asyncio.Future = asyncio.get_event_loop().create_future()
@@ -248,6 +295,20 @@ async def _enqueue_request(
             client_id, {"description": None, "processed": 0, "rejected": 0}
         )
         cs["processed"] = cs.get("processed", 0) + 1
+
+    # Cache successful embedding responses for future hits
+    if (
+        state.embedding_cache is not None
+        and cache_body_data is not None
+        and response.status_code == 200
+        and isinstance(response, JSONResponse)
+    ):
+        try:
+            await state.embedding_cache.set(
+                path, cache_body_data, cache_model, response.body, client_id
+            )
+        except Exception:
+            pass  # never fail a user request due to cache write errors
 
     response.headers["X-Queue-Wait-Time"] = str(wait_ms)
     if waited:
