@@ -12,6 +12,9 @@
 #   OQP_PROXY__PORT=11435
 #   OQP_OLLAMA__HOSTS__0__URL=http://ollama:11434
 #   OQP_AUTH__ENABLED=true
+#   OQP_ROUTING__STRATEGY=model_aware
+#   OQP_EMBEDDING_CACHE__ENABLED=true
+#   OQP_KEEP_ALIVE__DEFAULT=5m
 
 proxy:
   host: "0.0.0.0"
@@ -33,8 +36,12 @@ ollama:
     #   http://ollama:11434
     - url: "http://ollama-primary:11434"
       name: "primary"
-    # - url: "http://ollama-fallback:11434"
-    #   name: "fallback"
+      weight: 1              # NEW v0.2.0: relative weight for weighted round-robin (default 1)
+      model_sync_interval: 30  # NEW v0.2.0: seconds between /api/tags polls for routing table
+    # - url: "http://ollama-secondary:11434"
+    #   name: "secondary"
+    #   weight: 1
+    #   model_sync_interval: 30
   health_check_interval: 30  # seconds between recovery checks on unhealthy hosts
   request_timeout: 300       # seconds before upstream timeout
 
@@ -69,17 +76,25 @@ auth:
   enabled: false             # set true to require API keys on all requests
   # WARNING: auth.enabled: true with no keys configured is a fatal startup error.
   keys: []
-  # Example keys:
+  # Example keys (v0.2.0 — includes new max_concurrent field):
   # - key: "${ADMIN_API_KEY}"       # or hardcode, but use env vars for real deployments
   #   client_id: "admin"
   #   description: "Admin key — full access"
   #   max_priority: high
   #   management: true              # required to call /queue/pause, /drain, /flush
+  #   max_concurrent: 0            # 0 = unlimited (subject to proxy.max_concurrent)
+  # - key: "${OPENWEBUI_API_KEY}"
+  #   client_id: "openwebui"
+  #   description: "Open WebUI — interactive"
+  #   max_priority: high
+  #   management: false
+  #   max_concurrent: 0
   # - key: "${MEMSEARCH_API_KEY}"
   #   client_id: "memsearch-watch"
   #   description: "Background embedding re-index jobs"
   #   max_priority: low
   #   management: false
+  #   max_concurrent: 2            # cap batch client at 2 concurrent
   rate_limit:
     max_failures: 10         # consecutive auth failures per IP before 429
     window_seconds: 60       # rolling window for failure counting
@@ -87,3 +102,83 @@ auth:
 logging:
   level: "info"
   format: "json"             # json or text
+
+# ---------------------------------------------------------------------------
+# NEW v0.2.0 — Client injection
+# ---------------------------------------------------------------------------
+# Port-based auth bypass for clients that can't send Bearer headers.
+# Each injection listener binds to a separate port and injects a fixed client
+# identity. The client doesn't need to send any Authorization header.
+#
+# SECURITY:
+# - Injection ports default to 127.0.0.1 (loopback only).
+# - Binding to non-loopback addresses requires allow_public_injection: true.
+# - If allow_public_injection: true AND auth.enabled: false, the proxy emits a
+#   startup security warning — any host on the network can consume GPU time.
+# - Authorization headers received on injection ports are stripped before
+#   forwarding to upstream — tokens are never relayed to Ollama.
+#
+# client_injection:
+#   listeners:
+#     - listen_port: 11436
+#       inject_as: memsearch-watch     # must match an auth.keys[].client_id
+#       bind: 127.0.0.1               # default: loopback only
+#     - listen_port: 11437
+#       inject_as: localllm
+#   allow_public_injection: false     # must be true to bind to non-loopback
+
+# ---------------------------------------------------------------------------
+# NEW v0.2.0 — Model-aware routing
+# ---------------------------------------------------------------------------
+# Route requests to the Ollama host that already has the target model loaded.
+# Polling uses ollama.hosts[].model_sync_interval (per host, default 30s).
+# Weighted round-robin is deterministic: weight=2 means 2 requests per 1 for weight=1.
+#
+# Startup: probes all hosts via /api/tags once before accepting requests.
+# Fails fast if no host responds.
+#
+# OQP_ROUTING__STRATEGY=model_aware
+#
+# routing:
+#   strategy: model_aware            # model_aware | round_robin (default: round_robin)
+#   fallback: any_healthy            # when no host has the model loaded: pick any healthy host
+#   model_poll_timeout: 3            # seconds for each /api/tags poll
+
+# ---------------------------------------------------------------------------
+# NEW v0.2.0 — Embedding cache
+# ---------------------------------------------------------------------------
+# Hash-keyed Valkey (or Dragonfly drop-in) cache for /api/embed and /api/embeddings.
+# Cache hits bypass the queue and upstream entirely.
+#
+# Backend: Valkey is recommended. Dragonfly is a supported drop-in (same RESP protocol).
+# For a Valkey service in the same Docker Compose stack:
+#   backend: "redis://valkey:6379/0"
+#
+# Startup: if enabled: true, the proxy pings the backend. Startup aborts if unreachable.
+# Runtime: RESP errors degrade gracefully — logged once/minute, bypass cache, no user failure.
+#
+# OQP_EMBEDDING_CACHE__ENABLED=true
+# OQP_EMBEDDING_CACHE__BACKEND=redis://valkey:6379/0
+#
+# embedding_cache:
+#   enabled: false
+#   backend: "redis://valkey:6379/0"
+#   ttl: 86400                        # seconds (24 hours default)
+#   max_entry_bytes: 32768            # skip caching responses larger than this (32 KB)
+#   key_prefix: "oqp:embed:"
+#   connect_timeout: 2               # seconds; startup aborts if unreachable
+
+# ---------------------------------------------------------------------------
+# NEW v0.2.0 — keep_alive defaulting
+# ---------------------------------------------------------------------------
+# Inject a keep_alive value into request bodies so Ollama doesn't unload models
+# between bursty requests. Applies to: /api/generate, /api/chat, /api/embed, /api/embeddings.
+#
+# override: false — only inject if the client doesn't send keep_alive
+# override: true  — always replace the client's value with the proxy default
+#
+# OQP_KEEP_ALIVE__DEFAULT=5m
+#
+# keep_alive:
+#   default: "5m"
+#   override: false
