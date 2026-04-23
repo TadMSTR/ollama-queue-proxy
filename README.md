@@ -48,7 +48,48 @@ Background jobs send `low`. Interactive tools send `normal` or `high`. The queue
 
 ## How it works
 
-![Request flow diagram](docs/request-flow.drawio.png)
+```mermaid
+flowchart TD
+    subgraph Entry["Entry Points"]
+        C1["Consumers\n(Open WebUI, LangChain, agents)\nport 11435"]
+        C2["No-auth clients\nport 11436 / 11437"]
+    end
+
+    C1 -->|"Bearer token"| AUTH
+    C2 -->|"no header"| INJ["Client Injection\ninjects client_id + priority ceiling"]
+    INJ --> AUTH
+
+    AUTH{"Auth\ncheck"}
+    AUTH -->|"invalid"| E401["401 Unauthorized"]
+    AUTH -->|"pass"| EMBED
+
+    EMBED{"Embedding\nrequest?\n/api/embed\n/api/embeddings"}
+    EMBED -->|"yes"| CACHE{"Valkey cache\nSHA-256 key"}
+    EMBED -->|"no"| PRI
+
+    CACHE -->|"HIT"| HIT["Return cached response\nX-Cache: HIT\nskips queue + upstream"]
+    CACHE -->|"MISS"| PRI
+
+    PRI["Priority Queue\nhigh › normal › low\n(capped to key's max_priority)"]
+    PRI -->|"depth exceeded"| E503["429 / 503 + Retry-After"]
+    PRI --> WORKERS["Worker Pool\nmax_concurrent slots\nper-client semaphore"]
+
+    WORKERS --> KA["Inject keep_alive\ninto request body"]
+    KA --> ROUTER{"Model-aware\nrouter"}
+
+    POLLER["Background poller\nGET /api/tags every 30 s"]
+    POLLER -->|"live model inventory"| ROUTER
+
+    ROUTER -->|"model loaded on host"| H1["Ollama Host A\nprimary · weight 2"]
+    ROUTER -->|"model loaded on host"| H2["Ollama Host B\nsecondary · weight 1"]
+    ROUTER -->|"no match → weighted\nround-robin"| H1
+
+    H1 -->|"connection failure"| H2
+    H2 -->|"all hosts failed"| E502["503 X-Failover-Exhausted"]
+
+    H1 --> RESP["Response\nX-Queue-Wait-Time\nX-Failover-Host\nX-Queue-Position"]
+    H2 --> RESP
+```
 
 Requests from multiple consumers enter the proxy, are authenticated (or identity-injected for consumers without Bearer support), and placed into one of three priority tiers. A worker pool drains the tiers in order. For each request, the model-aware router picks the best host (one that already has the model loaded). Embedding requests check the cache first — hits skip the queue and upstream entirely. `keep_alive` is injected into request bodies so Ollama doesn't unload models between requests. Per-client concurrency caps prevent any single client from monopolizing the queue.
 
