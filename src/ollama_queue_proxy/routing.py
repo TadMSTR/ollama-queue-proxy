@@ -75,7 +75,7 @@ class RoutingTable:
         Synchronous initial poll of all hosts. Fail-fast if no host responds.
         Called before accepting requests.
         """
-        results = await asyncio.gather(
+        await asyncio.gather(
             *[self._poll_host(state) for state in self._states.values()],
             return_exceptions=True,
         )

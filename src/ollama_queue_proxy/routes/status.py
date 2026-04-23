@@ -181,7 +181,9 @@ async def metrics(request: Request):
 
     # Embedding cache metrics
     if state.embedding_cache is not None:
-        from ..cache import hits as cache_hits, misses as cache_misses, errors as cache_errors
+        from ..cache import errors as cache_errors
+        from ..cache import hits as cache_hits
+        from ..cache import misses as cache_misses
 
         lines += [
             "# HELP oqp_embedding_cache_hits_total Embedding cache hits",

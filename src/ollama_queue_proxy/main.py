@@ -24,9 +24,9 @@ from .hosts import HostManager
 from .middleware import RequestContextMiddleware, get_client_id, parse_priority
 from .proxy import dispatch_request, read_body
 from .queue import PriorityQueueManager, QueueFull, QueueItem, QueuePaused, RequestExpired
-from .routing import RoutingTable
 from .routes.queue import router as queue_router
 from .routes.status import router as status_router
+from .routing import RoutingTable
 from .webhooks import WebhookManager, validate_webhook_url
 
 logger = logging.getLogger(__name__)
