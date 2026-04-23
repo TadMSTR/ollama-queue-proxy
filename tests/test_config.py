@@ -201,6 +201,52 @@ def test_injection_allow_public_no_auth_emits_warning(tmp_path, capsys):
     assert "allow_public_injection" in captured.err
 
 
+def test_injection_non_loopback_bind_without_allow_public_exits(tmp_path):
+    data = _config_with_auth_and_injection()
+    data["client_injection"]["listeners"][0]["bind"] = "0.0.0.0"
+    path = write_config(tmp_path, data)
+    with pytest.raises(SystemExit):
+        load_config(path)
+
+
+def test_injection_non_loopback_bind_with_allow_public_warns(tmp_path, capsys):
+    data = _config_with_auth_and_injection()
+    data["client_injection"]["listeners"][0]["bind"] = "0.0.0.0"
+    data["client_injection"]["allow_public_injection"] = True
+    path = write_config(tmp_path, data)
+    load_config(path)  # allow_public_injection=true unlocks the bind; warning still fires
+    captured = capsys.readouterr()
+    assert "WARNING" in captured.err
+    assert "non-loopback" in captured.err
+
+
+def test_injection_non_loopback_bind_with_auth_and_allow_public_still_warns(tmp_path, capsys):
+    # auth.enabled=true does NOT silence the non-loopback warning — injection bypasses main-port auth.
+    data = _config_with_auth_and_injection()
+    data["client_injection"]["listeners"][0]["bind"] = "192.168.1.50"
+    data["client_injection"]["allow_public_injection"] = True
+    path = write_config(tmp_path, data)
+    load_config(path)
+    captured = capsys.readouterr()
+    assert "non-loopback" in captured.err
+
+
+def test_injection_localhost_bind_accepted(tmp_path):
+    data = _config_with_auth_and_injection()
+    data["client_injection"]["listeners"][0]["bind"] = "localhost"
+    path = write_config(tmp_path, data)
+    cfg = load_config(path)
+    assert cfg.client_injection.listeners[0].bind == "localhost"
+
+
+def test_injection_ipv6_loopback_bind_accepted(tmp_path):
+    data = _config_with_auth_and_injection()
+    data["client_injection"]["listeners"][0]["bind"] = "::1"
+    path = write_config(tmp_path, data)
+    cfg = load_config(path)
+    assert cfg.client_injection.listeners[0].bind == "::1"
+
+
 # ---------------------------------------------------------------------------
 # Routing config
 # ---------------------------------------------------------------------------

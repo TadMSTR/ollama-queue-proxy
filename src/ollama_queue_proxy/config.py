@@ -189,6 +189,7 @@ class Config(BaseModel):
         self._validate_injection_ports()
         self._validate_inject_as_refs()
         self._validate_client_max_concurrent()
+        self._validate_public_injection_bind()
         self._warn_public_injection_no_auth()
         return self
 
@@ -227,13 +228,41 @@ class Config(BaseModel):
                 )
                 sys.exit(1)
 
+    def _validate_public_injection_bind(self) -> None:
+        loopback = {"127.0.0.1", "localhost", "::1"}
+        for listener in self.client_injection.listeners:
+            if listener.bind in loopback:
+                continue
+            if not self.client_injection.allow_public_injection:
+                print(
+                    f"FATAL: client_injection.listeners[listen_port={listener.listen_port}].bind "
+                    f"is '{listener.bind}' (non-loopback) but allow_public_injection is false. "
+                    "Set allow_public_injection: true to confirm exposing an unauthenticated "
+                    "injection port on the network, or change bind to 127.0.0.1.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+
     def _warn_public_injection_no_auth(self) -> None:
+        loopback = {"127.0.0.1", "localhost", "::1"}
+        has_non_loopback = any(
+            listener.bind not in loopback
+            for listener in self.client_injection.listeners
+        )
         if self.client_injection.allow_public_injection and not self.auth.enabled:
             print(
                 "WARNING: allow_public_injection is true AND auth.enabled is false. "
                 "Injection ports will bind on all interfaces with no credential check — "
                 "any host on the network can consume queue slots under an injected identity. "
                 "Set auth.enabled: true or restrict allow_public_injection: false.",
+                file=sys.stderr,
+            )
+        elif has_non_loopback:
+            print(
+                "WARNING: one or more client_injection.listeners bind to a non-loopback "
+                "address. Injection ports bypass Bearer auth by design — any host able to "
+                "reach that port can consume queue slots under the injected client identity. "
+                "Restrict access at the firewall / reverse proxy layer.",
                 file=sys.stderr,
             )
 

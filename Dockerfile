@@ -8,4 +8,4 @@ USER appuser
 EXPOSE 11435
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:11435/health')" || exit 1
-CMD ["uvicorn", "ollama_queue_proxy.main:app", "--host", "0.0.0.0", "--port", "11435"]
+CMD ["ollama-queue-proxy"]
