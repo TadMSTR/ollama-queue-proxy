@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse
 
 from .auth import AuthManager
 from .cache import EmbeddingCache
+from .concurrency import ClientConcurrencyManager
 from .config import Config, load_config
 from .hosts import HostManager
 from .middleware import RequestContextMiddleware, get_client_id, parse_priority
@@ -41,6 +42,7 @@ class AppState:
     http_client: httpx.AsyncClient
     routing_table: RoutingTable | None = None
     embedding_cache: EmbeddingCache | None = None
+    concurrency_manager: ClientConcurrencyManager | None = None
     start_time: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     client_stats: dict[str, dict[str, Any]] = field(default_factory=dict)
     shutting_down: bool = False
@@ -116,6 +118,10 @@ async def lifespan(app: FastAPI):
         embedding_cache = EmbeddingCache(config.embedding_cache)
         await embedding_cache.startup()
 
+    concurrency_manager: ClientConcurrencyManager | None = None
+    if any(k.max_concurrent > 0 for k in config.auth.keys):
+        concurrency_manager = ClientConcurrencyManager(config.auth.keys)
+
     state = AppState(
         config=config,
         auth_manager=auth_manager,
@@ -125,6 +131,7 @@ async def lifespan(app: FastAPI):
         http_client=http_client,
         routing_table=routing_table,
         embedding_cache=embedding_cache,
+        concurrency_manager=concurrency_manager,
         client_stats=client_stats,
     )
     app.state.oqp = state
@@ -180,18 +187,48 @@ app.include_router(status_router)
 app.include_router(queue_router)
 
 
+_KEEP_ALIVE_PATHS = frozenset({
+    "/api/generate", "/api/chat", "/api/embed", "/api/embeddings"
+})
+
+
+def _inject_keep_alive(body: bytes, cfg_default: str, override: bool, max_body_mb: int) -> bytes:
+    """
+    Parse JSON body and inject keep_alive if needed.
+    Returns the (possibly modified) body. Never logs body content (FLAG E).
+    Skips mutation if body exceeds max_body_mb to avoid memory pressure.
+    """
+    max_bytes = max_body_mb * 1024 * 1024
+    if len(body) > max_bytes:
+        return body
+    try:
+        data = json.loads(body)
+    except (json.JSONDecodeError, ValueError):
+        return body
+    if not isinstance(data, dict):
+        return body
+    if override or "keep_alive" not in data:
+        data["keep_alive"] = cfg_default
+    return json.dumps(data, separators=(",", ":")).encode("utf-8")
+
+
 async def _enqueue_request(
     request: Request,
     client_id: str | None,
     tier: str,
     state: AppState,
+    reentries: int = 0,
 ) -> JSONResponse:
     """
     Buffer the request body, enqueue it, and await dispatch. Used by both the main
     proxy handler and injection port handlers to share queue/worker logic.
 
-    For embedding endpoints, checks the cache before enqueueing. Cache hits bypass
-    the queue entirely and return immediately.
+    Before enqueueing:
+    - Injects keep_alive into request body for the four supported endpoints.
+    - Checks embedding cache; cache hits bypass the queue entirely.
+    After dispatch:
+    - Populates embedding cache on successful 2xx JSONResponse.
+    Per-client concurrency cap is enforced inside dispatch_fn via ClientConcurrencyManager.
     """
     from .cache import CACHEABLE_PATHS
     from .proxy import extract_model
@@ -202,8 +239,16 @@ async def _enqueue_request(
     if body_err:
         return body_err
 
-    # Embedding cache — parsed body and model extracted once, reused for set on miss
+    # keep_alive injection — runs before cache check so cached responses also reflect
+    # the injected value (though for embeddings keep_alive has no effect upstream)
     path = request.url.path
+    ka_cfg = state.config.keep_alive
+    if path in _KEEP_ALIVE_PATHS:
+        body = _inject_keep_alive(
+            body, ka_cfg.default, ka_cfg.override, state.config.proxy.max_request_body_mb
+        )
+
+    # Embedding cache — parsed body and model extracted once, reused for set on miss
     cache_body_data: dict | None = None
     cache_model: str = ""
 
@@ -234,16 +279,25 @@ async def _enqueue_request(
     enqueue_time = time.monotonic()
     future: asyncio.Future = asyncio.get_event_loop().create_future()
 
+    conc_mgr = state.concurrency_manager
+
     async def dispatch_fn():
-        return await dispatch_request(
-            request=request,
-            body=body,
-            client_id=client_id,
-            config=state.config,
-            host_manager=state.host_manager,
-            client=state.http_client,
-            routing_table=state.routing_table,
-        )
+        # Per-client concurrency cap: acquire slot before upstream, release after
+        if conc_mgr is not None:
+            await conc_mgr.acquire(client_id, reentries=reentries)
+        try:
+            return await dispatch_request(
+                request=request,
+                body=body,
+                client_id=client_id,
+                config=state.config,
+                host_manager=state.host_manager,
+                client=state.http_client,
+                routing_table=state.routing_table,
+            )
+        finally:
+            if conc_mgr is not None:
+                conc_mgr.release(client_id)
 
     item = QueueItem(
         tier=tier,

@@ -162,6 +162,23 @@ async def metrics(request: Request):
     for host in state.host_manager.hosts:
         lines.append(f'oqp_host_failures_total{{name="{host.name}"}} {host.failures}')
 
+    # Per-client concurrency metrics
+    if state.concurrency_manager is not None:
+        cm = state.concurrency_manager
+        lines += [
+            "# HELP oqp_client_inflight Current in-flight requests per client",
+            "# TYPE oqp_client_inflight gauge",
+        ]
+        for cid, count in cm.inflight_counts().items():
+            lines.append(f'oqp_client_inflight{{client_id="{cid}"}} {count}')
+
+        lines += [
+            "# HELP oqp_client_cap_waiting Requests waiting on per-client concurrency cap",
+            "# TYPE oqp_client_cap_waiting gauge",
+        ]
+        for cid, count in cm.cap_waiting_counts().items():
+            lines.append(f'oqp_client_cap_waiting{{client_id="{cid}"}} {count}')
+
     # Embedding cache metrics
     if state.embedding_cache is not None:
         from ..cache import hits as cache_hits, misses as cache_misses, errors as cache_errors
