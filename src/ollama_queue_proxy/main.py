@@ -21,6 +21,7 @@ from .hosts import HostManager
 from .middleware import RequestContextMiddleware, get_client_id, parse_priority
 from .proxy import dispatch_request, read_body
 from .queue import PriorityQueueManager, QueueFull, QueueItem, QueuePaused, RequestExpired
+from .routing import RoutingTable
 from .routes.queue import router as queue_router
 from .routes.status import router as status_router
 from .webhooks import WebhookManager, validate_webhook_url
@@ -36,6 +37,7 @@ class AppState:
     queue_manager: PriorityQueueManager
     webhook_manager: WebhookManager
     http_client: httpx.AsyncClient
+    routing_table: RoutingTable | None = None
     start_time: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     client_stats: dict[str, dict[str, Any]] = field(default_factory=dict)
     shutting_down: bool = False
@@ -99,6 +101,12 @@ async def lifespan(app: FastAPI):
             "rejected": 0,
         }
 
+    # Build routing table if model-aware strategy is configured
+    routing_table: RoutingTable | None = None
+    if config.routing.strategy != "round_robin":
+        routing_table = RoutingTable(config.ollama, config.routing, http_client)
+        await routing_table.startup_probe()
+
     state = AppState(
         config=config,
         auth_manager=auth_manager,
@@ -106,6 +114,7 @@ async def lifespan(app: FastAPI):
         queue_manager=queue_manager,
         webhook_manager=webhook_manager,
         http_client=http_client,
+        routing_table=routing_table,
         client_stats=client_stats,
     )
     app.state.oqp = state
@@ -114,6 +123,8 @@ async def lifespan(app: FastAPI):
     await host_manager.startup_check(http_client)
     queue_manager.start_workers()
     await host_manager.start_background_checks(http_client)
+    if routing_table:
+        routing_table.start_background_pollers()
 
     logger.info(
         "ollama-queue-proxy started host=%s port=%d auth=%s injection_listeners=%d",
@@ -138,6 +149,8 @@ async def lifespan(app: FastAPI):
 
     await queue_manager.stop_workers()
     await host_manager.stop()
+    if routing_table:
+        await routing_table.stop()
     await http_client.aclose()
     set_shared_state(None)
     logger.info("shutdown: complete")
@@ -182,6 +195,7 @@ async def _enqueue_request(
             config=state.config,
             host_manager=state.host_manager,
             client=state.http_client,
+            routing_table=state.routing_table,
         )
 
     item = QueueItem(

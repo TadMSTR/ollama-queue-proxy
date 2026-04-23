@@ -162,6 +162,23 @@ async def metrics(request: Request):
     for host in state.host_manager.hosts:
         lines.append(f'oqp_host_failures_total{{name="{host.name}"}} {host.failures}')
 
+    # Routing table metrics (model_aware strategy only)
+    if state.routing_table is not None:
+        rt = state.routing_table
+        lines += [
+            "# HELP oqp_host_models_loaded Number of models currently loaded on each host",
+            "# TYPE oqp_host_models_loaded gauge",
+        ]
+        for host_name, count in rt.host_model_counts().items():
+            lines.append(f'oqp_host_models_loaded{{host="{host_name}"}} {count}')
+
+        lines += [
+            "# HELP oqp_routing_decisions_total Routing decisions by reason",
+            "# TYPE oqp_routing_decisions_total counter",
+        ]
+        for reason, count in rt.routing_decisions.items():
+            lines.append(f'oqp_routing_decisions_total{{reason="{reason}"}} {count}')
+
     lines += [
         "# HELP oqp_uptime_seconds Proxy uptime in seconds since last start",
         "# TYPE oqp_uptime_seconds gauge",
