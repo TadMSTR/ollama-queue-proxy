@@ -23,6 +23,7 @@ from ollama_queue_proxy.cache import (
 from ollama_queue_proxy.concurrency import ClientConcurrencyManager
 from ollama_queue_proxy.config import ApiKeyConfig, EmbeddingCacheConfig
 from ollama_queue_proxy.main import _inject_keep_alive
+from ollama_queue_proxy.routes.status import _pm_label
 from ollama_queue_proxy.routing import RoutingTable
 
 VALKEY_URL = os.environ.get("VALKEY_URL", "redis://localhost:6379/0")
@@ -300,3 +301,29 @@ def test_v1_config_still_passes_tests(tmp_path):
     assert cfg.keep_alive.default == "5m"
     assert cfg.auth.keys[0].max_concurrent == 0
     assert cfg.ollama.hosts[0].weight == 1
+
+
+# ---------------------------------------------------------------------------
+# Prometheus label escaping — prevents label-injection via client-supplied model names
+# ---------------------------------------------------------------------------
+
+
+def test_pm_label_escapes_double_quote():
+    assert _pm_label('evil",injected="x') == 'evil\\",injected=\\"x'
+
+
+def test_pm_label_escapes_backslash():
+    assert _pm_label("path\\to\\model") == "path\\\\to\\\\model"
+
+
+def test_pm_label_escapes_newline():
+    assert _pm_label("line1\nline2") == "line1\\nline2"
+
+
+def test_pm_label_plain_string_passthrough():
+    assert _pm_label("nomic-embed-text") == "nomic-embed-text"
+
+
+def test_pm_label_backslash_before_quote():
+    # Backslash must be escaped before quote so \" (escaped quote) doesn't produce \\" (literal backslash + broken quote)
+    assert _pm_label('\\"') == '\\\\\\"'
