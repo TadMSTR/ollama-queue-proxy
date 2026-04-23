@@ -14,6 +14,10 @@ if TYPE_CHECKING:
 router = APIRouter()
 
 
+def _pm_label(v: str) -> str:
+    return v.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+
 @router.get("/health")
 async def health():
     """Lightweight liveness probe — no auth required, no upstream check."""
@@ -146,21 +150,93 @@ async def metrics(request: Request):
         "# TYPE oqp_host_healthy gauge",
     ]
     for host in state.host_manager.hosts:
-        lines.append(f'oqp_host_healthy{{name="{host.name}"}} {1 if host.healthy else 0}')
+        name = _pm_label(host.name)
+        lines.append(f'oqp_host_healthy{{name="{name}"}} {1 if host.healthy else 0}')
 
     lines += [
         "# HELP oqp_host_requests_total Total requests handled by host",
         "# TYPE oqp_host_requests_total counter",
     ]
     for host in state.host_manager.hosts:
-        lines.append(f'oqp_host_requests_total{{name="{host.name}"}} {host.requests_handled}')
+        name = _pm_label(host.name)
+        lines.append(f'oqp_host_requests_total{{name="{name}"}} {host.requests_handled}')
 
     lines += [
         "# HELP oqp_host_failures_total Total upstream failures for host",
         "# TYPE oqp_host_failures_total counter",
     ]
     for host in state.host_manager.hosts:
-        lines.append(f'oqp_host_failures_total{{name="{host.name}"}} {host.failures}')
+        name = _pm_label(host.name)
+        lines.append(f'oqp_host_failures_total{{name="{name}"}} {host.failures}')
+
+    # Per-client concurrency metrics
+    if state.concurrency_manager is not None:
+        cm = state.concurrency_manager
+        lines += [
+            "# HELP oqp_client_inflight Current in-flight requests per client",
+            "# TYPE oqp_client_inflight gauge",
+        ]
+        for cid, count in cm.inflight_counts().items():
+            lines.append(f'oqp_client_inflight{{client_id="{_pm_label(cid)}"}} {count}')
+
+        lines += [
+            "# HELP oqp_client_cap_waiting Requests waiting on per-client concurrency cap",
+            "# TYPE oqp_client_cap_waiting gauge",
+        ]
+        for cid, count in cm.cap_waiting_counts().items():
+            lines.append(f'oqp_client_cap_waiting{{client_id="{_pm_label(cid)}"}} {count}')
+
+    # Embedding cache metrics
+    if state.embedding_cache is not None:
+        from ..cache import errors as cache_errors
+        from ..cache import hits as cache_hits
+        from ..cache import misses as cache_misses
+
+        lines += [
+            "# HELP oqp_embedding_cache_hits_total Embedding cache hits",
+            "# TYPE oqp_embedding_cache_hits_total counter",
+        ]
+        for label, count in cache_hits.items():
+            client_id, model, endpoint = label.split(",", 2)
+            lines.append(
+                f'oqp_embedding_cache_hits_total{{client="{_pm_label(client_id)}",model="{_pm_label(model)}",'
+                f'endpoint="{_pm_label(endpoint)}"}} {count}'
+            )
+
+        lines += [
+            "# HELP oqp_embedding_cache_misses_total Embedding cache misses",
+            "# TYPE oqp_embedding_cache_misses_total counter",
+        ]
+        for label, count in cache_misses.items():
+            client_id, model, endpoint = label.split(",", 2)
+            lines.append(
+                f'oqp_embedding_cache_misses_total{{client="{_pm_label(client_id)}",model="{_pm_label(model)}",'
+                f'endpoint="{_pm_label(endpoint)}"}} {count}'
+            )
+
+        lines += [
+            "# HELP oqp_embedding_cache_errors_total Embedding cache RESP errors by kind",
+            "# TYPE oqp_embedding_cache_errors_total counter",
+        ]
+        for kind, count in cache_errors.items():
+            lines.append(f'oqp_embedding_cache_errors_total{{kind="{_pm_label(kind)}"}} {count}')
+
+    # Routing table metrics (model_aware strategy only)
+    if state.routing_table is not None:
+        rt = state.routing_table
+        lines += [
+            "# HELP oqp_host_models_loaded Number of models currently loaded on each host",
+            "# TYPE oqp_host_models_loaded gauge",
+        ]
+        for host_name, count in rt.host_model_counts().items():
+            lines.append(f'oqp_host_models_loaded{{host="{_pm_label(host_name)}"}} {count}')
+
+        lines += [
+            "# HELP oqp_routing_decisions_total Routing decisions by reason",
+            "# TYPE oqp_routing_decisions_total counter",
+        ]
+        for reason, count in rt.routing_decisions.items():
+            lines.append(f'oqp_routing_decisions_total{{reason="{_pm_label(reason)}"}} {count}')
 
     lines += [
         "# HELP oqp_uptime_seconds Proxy uptime in seconds since last start",

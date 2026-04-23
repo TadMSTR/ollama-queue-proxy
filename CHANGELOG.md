@@ -2,6 +2,34 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-04-22
+
+### Added
+
+- **Client injection** — port-based authentication bypass for clients that cannot send Bearer headers. Each injection listener binds to a configurable `listen_port` and injects a fixed `client_id` identity, granting the client its full `max_priority` / `max_concurrent` entitlements without requiring an `Authorization` header. Defaults to loopback-only (`127.0.0.1`); external binding requires `allow_public_injection: true`. A startup warning is emitted when `allow_public_injection: true` combined with `auth.enabled: false`, as this creates a fully unauthenticated endpoint on all interfaces.
+- **Model-aware routing** — weighted round-robin routing across Ollama hosts that already have the requested model loaded. A `RoutingTable` background poller queries `GET /api/tags` on each host at configurable intervals to maintain a live `(host → loaded_models)` map. On a model-match miss, falls back per `routing.fallback` (default: `any_healthy`). Requests without a `model` field use weighted round-robin across all healthy hosts. Fast-path invalidation removes a `(host, model)` pair immediately when a host returns "model not found".
+- **Embedding response cache** — SHA256-keyed Valkey (RESP-compatible) cache for `/api/embed` and `/api/embeddings`. Cache hits bypass the queue and upstream entirely. Runtime RESP errors degrade gracefully (log once/min, bypass cache). Startup fails fast if the backend is unreachable when `embedding_cache.enabled: true`. Dragonfly is a supported drop-in backend.
+- **keep_alive defaulting** — proxy-level middleware that injects a `keep_alive` value into request bodies for `/api/generate`, `/api/chat`, `/api/embed`, and `/api/embeddings` when the client does not supply one (or always, when `override: true`). Prevents Ollama from unloading models between bursty requests.
+- **Per-client concurrency caps** — `max_concurrent` field on `auth.keys[]` entries. Enforced via per-`client_id` async semaphore on top of the existing global `proxy.max_concurrent` ceiling. A fairness bound (3 secondary-queue re-entries) prevents a saturated capped client from blocking forward progress for other clients.
+- New config sections: `client_injection`, `routing`, `embedding_cache`, `keep_alive`.
+- New optional fields on existing config: `ollama.hosts[].weight`, `ollama.hosts[].model_sync_interval`, `auth.keys[].max_concurrent`.
+- New metrics: `oqp_host_models_loaded`, `oqp_routing_decisions_total`, `oqp_embedding_cache_hits_total`, `oqp_embedding_cache_misses_total`, `oqp_embedding_cache_errors_total`, `oqp_client_inflight`, `oqp_client_cap_waiting`.
+
+### Changed
+
+- Version skew corrected: `__init__.py` (was 0.1.0) and `pyproject.toml` (was 0.1.1) both updated to match the `v0.1.2` release tag; all three now advance together to 0.2.0.
+- `serve()` refactored to launch N+1 uvicorn `Server` instances via `asyncio.gather` (main port + one per injection listener). Graceful shutdown across all listeners on SIGTERM/SIGINT.
+- `Dockerfile` `CMD` switched from bare `uvicorn` invocation to the `ollama-queue-proxy` console script so `main:run()` actually launches the injection listener orchestration in containerized deployments.
+
+### Security
+
+- `client_injection.listeners[].bind` is now validated against `allow_public_injection`: a non-loopback bind without `allow_public_injection: true` fails config validation at startup. The non-loopback warning also fires whenever a listener binds off-loopback, regardless of `auth.enabled`, because injection ports bypass Bearer auth by design.
+- `/metrics` label values (`model`, `host`, `client`, `endpoint`, `reason`, `kind`) are now escaped before interpolation into the Prometheus exposition format, preventing label-injection via client-supplied model names.
+
+### Notes
+
+- All v0.1.x configs continue to work unchanged. New fields default to v0.1.x-equivalent behavior (`weight=1`, `model_sync_interval=30`, `max_concurrent=0`, `routing.strategy=round_robin`).
+
 ## [0.1.2] - 2026-04-21
 
 ### Fixed

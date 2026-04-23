@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from .config import Config
 from .hosts import HostManager, OllamaHost
+from .routing import RoutingTable
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +118,7 @@ async def dispatch_request(
     config: Config,
     host_manager: HostManager,
     client: httpx.AsyncClient,
+    routing_table: RoutingTable | None = None,
 ) -> StreamingResponse | JSONResponse:
     """
     Dispatch a buffered request to the appropriate Ollama host with failover.
@@ -150,15 +152,34 @@ async def dispatch_request(
 
     model = extract_model(body)
 
-    # Try hosts in order
-    remaining_hosts = list(host_manager.hosts)
-    last_error: str | None = None
+    # Build candidate host list — routing table (model_aware) or HostManager fallback
+    def _next_host() -> OllamaHost | None:
+        if routing_table is not None:
+            rt_state = routing_table.pick(model)
+            if rt_state is None:
+                return None
+            # Map routing state back to OllamaHost object for failover tracking
+            for h in host_manager.hosts:
+                if h.name == rt_state.name:
+                    return h
+            return None
+        # Default: first healthy host (HostManager order, v0.1.x behaviour)
+        for h in host_manager.hosts:
+            if not h.healthy:
+                continue
+            if model and h.models and model not in h.models:
+                continue
+            return h
+        return None
 
-    for host in remaining_hosts:
-        if not host.healthy:
-            continue
-        if model and host.models and model not in host.models:
-            continue
+    last_error: str | None = None
+    attempted: set[str] = set()
+
+    while True:
+        host = _next_host()
+        if host is None or host.name in attempted:
+            break
+        attempted.add(host.name)
 
         try:
             resp = await client.request(
@@ -169,6 +190,21 @@ async def dispatch_request(
                 timeout=config.ollama.request_timeout,
             )
             host.requests_handled += 1
+
+            # Fast-path routing invalidation: if Ollama says the model isn't loaded,
+            # remove it from the routing table immediately so next request routes elsewhere.
+            if resp.status_code == 404 and model and routing_table is not None:
+                try:
+                    err_body = resp.json()
+                    if "not found" in err_body.get("error", "").lower():
+                        routing_table.invalidate(host.name, model)
+                        logger.info(
+                            "routing.model_not_found host=%s model=%s — invalidated",
+                            host.name,
+                            model,
+                        )
+                except Exception:
+                    pass
 
             # Check if this is a streaming response.
             # Ollama uses application/x-ndjson for streaming generate/chat,
@@ -210,6 +246,11 @@ async def dispatch_request(
         except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPStatusError) as e:
             last_error = str(e)
             host_manager.mark_unhealthy(host, last_error)
+            if routing_table is not None:
+                # Mark host unreachable in routing table too
+                rt_state = routing_table._states.get(host.name)
+                if rt_state:
+                    rt_state.reachable = False
             logger.warning(
                 "proxy.failover host=%s error=%s trying_next=true", host.name, last_error
             )
