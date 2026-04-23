@@ -62,6 +62,8 @@ def _warn_open_binding(config: Config) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from .injection import set_shared_state
+
     config = load_config()
     _configure_logging(config)
 
@@ -107,16 +109,18 @@ async def lifespan(app: FastAPI):
         client_stats=client_stats,
     )
     app.state.oqp = state
+    set_shared_state(state)  # make available to injection apps
 
     await host_manager.startup_check(http_client)
     queue_manager.start_workers()
     await host_manager.start_background_checks(http_client)
 
     logger.info(
-        "ollama-queue-proxy started host=%s port=%d auth=%s",
+        "ollama-queue-proxy started host=%s port=%d auth=%s injection_listeners=%d",
         config.proxy.host,
         config.proxy.port,
         config.auth.enabled,
+        len(config.client_injection.listeners),
     )
 
     yield
@@ -135,13 +139,14 @@ async def lifespan(app: FastAPI):
     await queue_manager.stop_workers()
     await host_manager.stop()
     await http_client.aclose()
+    set_shared_state(None)
     logger.info("shutdown: complete")
 
 
 app = FastAPI(
     title="ollama-queue-proxy",
     description="Drop-in HTTP proxy for Ollama with priority queuing, auth, and failover",
-    version="0.1.0",
+    version="0.2.0",
     lifespan=lifespan,
 )
 
@@ -150,35 +155,18 @@ app.include_router(status_router)
 app.include_router(queue_router)
 
 
-@app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"])
-async def proxy_handler(request: Request, path: str):
-    """Catch-all proxy handler — forwards all Ollama API requests."""
-    state: AppState = app.state.oqp
+async def _enqueue_request(
+    request: Request,
+    client_id: str | None,
+    tier: str,
+    state: AppState,
+) -> JSONResponse:
+    """
+    Buffer the request body, enqueue it, and await dispatch. Used by both the main
+    proxy handler and injection port handlers to share queue/worker logic.
+    """
     request_id = getattr(request.state, "request_id", "unknown")
 
-    if state.shutting_down:
-        return JSONResponse(
-            status_code=503,
-            content={"error": "proxy is shutting down", "request_id": request_id},
-        )
-
-    # Authenticate
-    key_cfg, auth_err = await state.auth_manager.authenticate(request)
-    if auth_err:
-        return auth_err
-
-    # Resolve client ID — from key config (authoritative) or caller header
-    client_id: str | None
-    if state.config.auth.enabled and key_cfg:
-        client_id = key_cfg.client_id
-    else:
-        client_id = get_client_id(request)
-
-    # Parse and enforce priority
-    requested_priority = parse_priority(request)
-    tier = state.auth_manager.enforce_priority_ceiling(requested_priority, key_cfg)
-
-    # Buffer request body
     body, body_err = await read_body(request, state.config.proxy.max_request_body_mb)
     if body_err:
         return body_err
@@ -224,7 +212,6 @@ async def proxy_handler(request: Request, path: str):
             content={"error": f"queue tier '{e.tier}' is paused", "request_id": request_id},
         )
 
-    # Wait for dispatch
     try:
         response = await future
     except RequestExpired as e:
@@ -242,14 +229,12 @@ async def proxy_handler(request: Request, path: str):
     wait_ms = int((time.monotonic() - enqueue_time) * 1000)
     waited = wait_ms > 0 and position > 1
 
-    # Track client stats
     if client_id:
         cs = state.client_stats.setdefault(
             client_id, {"description": None, "processed": 0, "rejected": 0}
         )
         cs["processed"] = cs.get("processed", 0) + 1
 
-    # Inject queue timing headers (both JSONResponse and StreamingResponse inherit Response)
     response.headers["X-Queue-Wait-Time"] = str(wait_ms)
     if waited:
         response.headers["X-Queue-Position"] = str(position)
@@ -257,12 +242,87 @@ async def proxy_handler(request: Request, path: str):
     return response
 
 
+@app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"])
+async def proxy_handler(request: Request, path: str):
+    """Catch-all proxy handler — forwards all Ollama API requests."""
+    state: AppState = app.state.oqp
+    request_id = getattr(request.state, "request_id", "unknown")
+
+    if state.shutting_down:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "proxy is shutting down", "request_id": request_id},
+        )
+
+    # Authenticate
+    key_cfg, auth_err = await state.auth_manager.authenticate(request)
+    if auth_err:
+        return auth_err
+
+    # Resolve client ID — from key config (authoritative) or caller header
+    client_id: str | None
+    if state.config.auth.enabled and key_cfg:
+        client_id = key_cfg.client_id
+    else:
+        client_id = get_client_id(request)
+
+    # Parse and enforce priority ceiling
+    requested_priority = parse_priority(request)
+    tier = state.auth_manager.enforce_priority_ceiling(requested_priority, key_cfg)
+
+    return await _enqueue_request(
+        request=request,
+        client_id=client_id,
+        tier=tier,
+        state=state,
+    )
+
+
 def run():
     import uvicorn
+
     config = load_config()
-    uvicorn.run(
+
+    # Build the set of uvicorn servers: 1 main + N injection listeners
+    main_cfg = uvicorn.Config(
         "ollama_queue_proxy.main:app",
         host=config.proxy.host,
         port=config.proxy.port,
         log_config=None,
     )
+    main_server = uvicorn.Server(main_cfg)
+
+    injection_servers: list[uvicorn.Server] = []
+    if config.client_injection.listeners:
+        from .injection import make_injection_app
+
+        key_map = {k.client_id: k for k in config.auth.keys}
+        for listener in config.client_injection.listeners:
+            key_cfg = key_map[listener.inject_as]
+            inj_app = make_injection_app(listener.inject_as, key_cfg)
+            inj_cfg = uvicorn.Config(
+                inj_app,
+                host=listener.bind,
+                port=listener.listen_port,
+                log_config=None,
+            )
+            injection_servers.append(uvicorn.Server(inj_cfg))
+            logger.info(
+                "injection.listener registered inject_as=%s port=%d bind=%s",
+                listener.inject_as,
+                listener.listen_port,
+                listener.bind,
+            )
+
+    all_servers = [main_server] + injection_servers
+
+    async def serve_all():
+        tasks = [asyncio.create_task(s.serve()) for s in all_servers]
+        # When any server exits (e.g. SIGTERM to main), signal all to stop
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for s in all_servers:
+            s.should_exit = True
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    asyncio.run(serve_all())
