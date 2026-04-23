@@ -13,6 +13,24 @@ from pydantic import BaseModel, field_validator, model_validator
 class HostConfig(BaseModel):
     url: str
     name: str
+    weight: int = 1
+    model_sync_interval: int = 30
+
+    @field_validator("weight")
+    @classmethod
+    def positive_weight(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"ollama.hosts[].weight must be a positive integer, got {v}")
+        return v
+
+    @field_validator("model_sync_interval")
+    @classmethod
+    def positive_sync_interval(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(
+                f"ollama.hosts[].model_sync_interval must be >= 1 second, got {v}"
+            )
+        return v
 
 
 class OllamaConfig(BaseModel):
@@ -53,6 +71,16 @@ class ApiKeyConfig(BaseModel):
     description: str | None = None
     max_priority: Literal["high", "normal", "low"] = "normal"
     management: bool = False
+    max_concurrent: int = 0  # 0 = unlimited (subject to proxy.max_concurrent)
+
+    @field_validator("max_concurrent")
+    @classmethod
+    def non_negative_concurrent(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError(
+                f"auth.keys[].max_concurrent must be a non-negative integer, got {v}"
+            )
+        return v
 
 
 class RateLimitConfig(BaseModel):
@@ -98,6 +126,51 @@ class ProxyConfig(BaseModel):
         return v
 
 
+# ---------------------------------------------------------------------------
+# v0.2.0 — new config sections
+# ---------------------------------------------------------------------------
+
+
+class InjectionListenerConfig(BaseModel):
+    listen_port: int
+    inject_as: str  # must match an auth.keys[].client_id
+    bind: str = "127.0.0.1"
+
+    @field_validator("listen_port")
+    @classmethod
+    def valid_listen_port(cls, v: int) -> int:
+        if not (1024 <= v <= 65535):
+            raise ValueError(
+                f"client_injection.listeners[].listen_port must be in 1024–65535, got {v}"
+            )
+        return v
+
+
+class ClientInjectionConfig(BaseModel):
+    listeners: list[InjectionListenerConfig] = []
+    allow_public_injection: bool = False
+
+
+class RoutingConfig(BaseModel):
+    strategy: Literal["model_aware", "round_robin"] = "round_robin"
+    fallback: Literal["any_healthy"] = "any_healthy"
+    model_poll_timeout: int = 3
+
+
+class EmbeddingCacheConfig(BaseModel):
+    enabled: bool = False
+    backend: str = "redis://localhost:6379/0"
+    ttl: int = 86400
+    max_entry_bytes: int = 32768
+    key_prefix: str = "oqp:embed:"
+    connect_timeout: int = 2
+
+
+class KeepAliveConfig(BaseModel):
+    default: str = "5m"
+    override: bool = False
+
+
 class Config(BaseModel):
     proxy: ProxyConfig = ProxyConfig()
     ollama: OllamaConfig
@@ -105,6 +178,64 @@ class Config(BaseModel):
     webhooks: WebhookConfig = WebhookConfig()
     auth: AuthConfig = AuthConfig()
     logging: LoggingConfig = LoggingConfig()
+    # v0.2.0 sections
+    client_injection: ClientInjectionConfig = ClientInjectionConfig()
+    routing: RoutingConfig = RoutingConfig()
+    embedding_cache: EmbeddingCacheConfig = EmbeddingCacheConfig()
+    keep_alive: KeepAliveConfig = KeepAliveConfig()
+
+    @model_validator(mode="after")
+    def validate_v2_constraints(self) -> "Config":
+        self._validate_injection_ports()
+        self._validate_inject_as_refs()
+        self._validate_client_max_concurrent()
+        self._warn_public_injection_no_auth()
+        return self
+
+    def _validate_injection_ports(self) -> None:
+        seen: set[int] = {self.proxy.port}
+        for listener in self.client_injection.listeners:
+            if listener.listen_port in seen:
+                print(
+                    f"FATAL: client_injection.listeners[].listen_port {listener.listen_port} "
+                    f"conflicts with another port (proxy.port or another injection listener).",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            seen.add(listener.listen_port)
+
+    def _validate_inject_as_refs(self) -> None:
+        known_ids = {k.client_id for k in self.auth.keys}
+        for listener in self.client_injection.listeners:
+            if listener.inject_as not in known_ids:
+                print(
+                    f"FATAL: client_injection.listeners[].inject_as '{listener.inject_as}' "
+                    f"does not match any auth.keys[].client_id. Known IDs: {sorted(known_ids)}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+
+    def _validate_client_max_concurrent(self) -> None:
+        global_cap = self.proxy.max_concurrent
+        for key in self.auth.keys:
+            if key.max_concurrent > global_cap:
+                print(
+                    f"FATAL: auth.keys[client_id={key.client_id}].max_concurrent "
+                    f"({key.max_concurrent}) exceeds proxy.max_concurrent ({global_cap}). "
+                    f"Set max_concurrent <= {global_cap} or increase proxy.max_concurrent.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+
+    def _warn_public_injection_no_auth(self) -> None:
+        if self.client_injection.allow_public_injection and not self.auth.enabled:
+            print(
+                "WARNING: allow_public_injection is true AND auth.enabled is false. "
+                "Injection ports will bind on all interfaces with no credential check — "
+                "any host on the network can consume queue slots under an injected identity. "
+                "Set auth.enabled: true or restrict allow_public_injection: false.",
+                file=sys.stderr,
+            )
 
 
 def _apply_env_overrides(data: dict, prefix: str = "OQP") -> dict:
