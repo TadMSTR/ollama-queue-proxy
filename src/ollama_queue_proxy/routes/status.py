@@ -202,6 +202,14 @@ async def metrics(request: Request):
                 f'oqp_embedding_cache_hits_total{{client="{_pm_label(client_id)}",model="{_pm_label(model)}",'
                 f'endpoint="{_pm_label(endpoint)}"}} {count}'
             )
+        # Emit zero for miss labels absent from hits so Prometheus always has the time series
+        for label in cache_misses:
+            if label not in cache_hits:
+                client_id, model, endpoint = label.split(",", 2)
+                lines.append(
+                    f'oqp_embedding_cache_hits_total{{client="{_pm_label(client_id)}",model="{_pm_label(model)}",'
+                    f'endpoint="{_pm_label(endpoint)}"}} 0'
+                )
 
         lines += [
             "# HELP oqp_embedding_cache_misses_total Embedding cache misses",
