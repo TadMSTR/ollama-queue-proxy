@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **`/v1/embeddings` returned Ollama-native shape instead of OpenAI shape** — Ollama's `/api/embed` sends `application/json` responses with `transfer-encoding: chunked`, which `dispatch_request` incorrectly classified as streaming. This caused `proxy_handler` to receive a `StreamingResponse` rather than a `JSONResponse`, so the `isinstance` guard before `wrap_response` was never entered and the Ollama-native body passed through unwrapped. Fixed by removing `transfer-encoding: chunked` from the streaming heuristic — chunked TE is a transport-layer concern and is not a reliable indicator of application-level streaming. True streaming responses are identified solely by their content-type (`text/event-stream`, `application/x-ndjson`).
+
 ## [0.3.1] - 2026-06-16
 
 ### Fixed

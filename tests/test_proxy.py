@@ -113,3 +113,68 @@ async def test_non_streaming_response_content_length_correct():
     assert response.headers["content-length"] != upstream_content_length, (
         "upstream content-length (with trailing newline) must not bleed into response"
     )
+
+
+# ---------------------------------------------------------------------------
+# OQP-4: /api/embed returns application/json with chunked TE — must be JSONResponse
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_chunked_json_response_not_treated_as_streaming():
+    """
+    dispatch_request must return JSONResponse (not StreamingResponse) when the
+    upstream sends application/json with transfer-encoding: chunked.
+    Ollama's /api/embed does this. Treating it as streaming caused proxy_handler's
+    isinstance(response, JSONResponse) check to fail, preventing the OpenAI compat
+    wrap_response call — the root cause of OQP-4.
+    """
+    from fastapi import Request
+    from fastapi.responses import JSONResponse, StreamingResponse
+    from ollama_queue_proxy.proxy import dispatch_request
+    from ollama_queue_proxy.hosts import HostManager, OllamaHost
+    from tests.conftest import make_config
+
+    payload = {"embeddings": [[0.1, 0.2, 0.3]], "model": "bge-m3"}
+
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 200
+    mock_resp.headers = httpx.Headers({
+        "content-type": "application/json; charset=utf-8",
+        "transfer-encoding": "chunked",
+    })
+    mock_resp.json.return_value = payload
+
+    mock_client = AsyncMock(spec=httpx.AsyncClient)
+    mock_client.request = AsyncMock(return_value=mock_resp)
+
+    cfg = make_config()
+    host = OllamaHost(url="http://ollama-test:11434", name="test")
+    host.healthy = True
+    hm = HostManager.__new__(HostManager)
+    hm.hosts = [host]
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/api/embed",
+        "query_string": b"",
+        "headers": [(b"content-type", b"application/json")],
+    }
+    request = Request(scope)
+    request.state.request_id = "test-oqp4"
+
+    response = await dispatch_request(
+        request=request,
+        body=json.dumps({"model": "bge-m3", "input": "test"}).encode(),
+        client_id=None,
+        config=cfg,
+        host_manager=hm,
+        client=mock_client,
+    )
+
+    assert isinstance(response, JSONResponse), (
+        "application/json response with transfer-encoding: chunked must return "
+        "JSONResponse so that proxy_handler can apply the OpenAI compat wrap"
+    )
+    assert not isinstance(response, StreamingResponse)
+    assert json.loads(response.body) == payload
