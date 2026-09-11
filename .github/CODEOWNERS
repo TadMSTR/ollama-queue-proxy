@@ -1,0 +1,11 @@
+# Code owners — F2.
+#
+# Single maintainer, so this is one line. It is still worth having: CODEOWNERS is what
+# makes review assignment automatic rather than remembered, and GitHub reads it when
+# branch protection requires an owner's approval.
+#
+# The auth and admission path is the product. If this repo ever gains a second
+# maintainer, split those paths out here first rather than later — they are where a
+# careless change is least visible and most expensive.
+
+* @TadMSTR

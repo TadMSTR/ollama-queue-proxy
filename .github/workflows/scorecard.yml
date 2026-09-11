@@ -1,0 +1,64 @@
+# OSSF Scorecard — F4.
+#
+# PUBLISHES RESULTS PUBLICLY. That is deliberate and was flagged as a decision rather
+# than discovered as a surprise: `publish_results: true` sends the score to the OpenSSF
+# public API, where anyone can read it. This repo is `visibility: public`, so its
+# branch protection, token permissions, pinning and release practices are already
+# observable — the score adds convenience, not exposure. Do not copy this file into a
+# private repo without revisiting that line.
+#
+# The score will not start high, and that is fine. Scorecard grades against practices
+# this repo has only just adopted (pinned actions, a secret-scanning gate, a lockfile)
+# plus several it has not (branch protection, signed releases, a fuzzing harness). The
+# number is a to-do list, not a verdict.
+
+name: Scorecard
+
+on:
+  branch_protection_rule:
+  schedule:
+    # Weekly. Most of what Scorecard measures — branch protection, admin settings,
+    # dependency update tooling — changes outside a commit, so a push trigger would
+    # miss precisely the drift this is here to catch.
+    - cron: "23 4 * * 1"
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write # upload the SARIF to the security tab
+      id-token: write # OIDC, required by publish_results
+      contents: read
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Run analysis
+        uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc # v2.4.4
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: true
+
+      # Retained separately from the SARIF upload because the security tab keeps only
+      # the findings, and the artifact keeps the whole scored run — which is what is
+      # actually useful when a score moves and the question is which check changed.
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: SARIF file
+          path: results.sarif
+          retention-days: 5
+
+      - name: Upload to code-scanning
+        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        with:
+          sarif_file: results.sarif
