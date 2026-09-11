@@ -26,7 +26,7 @@ dev = [
     # for a reason nobody changed. The linter half has the same problem in reverse: a
     # new release adding a rule to one of the selected families fails CI on untouched
     # code. Taking a bump is a decision (Dependabot will propose it), not a default.
-    "ruff==0.16.0",
+    "ruff==0.16.6",
     "anyio[trio]>=4.0",
 ]
 
