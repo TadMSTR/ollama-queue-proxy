@@ -1,3 +1,17 @@
+# Release — build, verify, then publish to GHCR.
+#
+# WHAT CHANGED IN 0.4.0 AND WHY THE ORDER MATTERS
+#
+# This workflow previously built and pushed in a single step with no provenance, no
+# SBOM, no vulnerability scan and a single architecture. Anything that went wrong went
+# wrong in public: the tag was already live before anyone could look at it.
+#
+# So the image is now built ONCE for amd64, loaded locally, scanned and smoke-tested,
+# and only then rebuilt multi-arch and pushed. The rebuild is nearly free — it is the
+# same buildx cache — and it buys the property that matters: nothing reaches GHCR that
+# has not already been run and scanned. A gate that fires after publication is a
+# notification, not a gate.
+
 name: Release
 
 on:
@@ -7,16 +21,27 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
   publish:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write # OIDC, required to sign the provenance attestation
+      attestations: write # write the attestation back to the repository
+
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567  # v3.3.0
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -24,17 +49,120 @@ jobs:
 
       - name: Extract metadata
         id: meta
-        uses: docker/metadata-action@369eb591f429131d6889c46b94e711f089e6ca96  # v5.6.1
+        uses: docker/metadata-action@369eb591f429131d6889c46b94e711f089e6ca96 # v5.6.1
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
 
-      - name: Build and push
-        uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75  # v6.9.0
+      # ---- verify before publishing -------------------------------------------------
+
+      # amd64 only, because a multi-platform build cannot be loaded into the local
+      # daemon — there is no single image to load. This is the copy that gets scanned
+      # and run.
+      - name: Build for verification (amd64, local)
+        uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75 # v6.9.0
         with:
           context: .
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: ollama-queue-proxy:verify
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Scan the image for vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ollama-queue-proxy:verify
+          format: table
+          # Fails the release. The base image is python:3.12-slim and its CVEs are this
+          # project's CVEs the moment it is published — there is no one else to inherit
+          # the problem. Limited to HIGH/CRITICAL with a fix available: failing on
+          # unfixable findings gives a red build with no action behind it, which teaches
+          # people to bypass the gate.
+          exit-code: "1"
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+
+      # Proves the image RUNS before it is published. The previous workflow never
+      # started the container it shipped.
+      #
+      # It needs a config file and a reachable Ollama, and neither is optional: with
+      # no config.yml the process exits FATAL, and the routing startup probe exits 1
+      # if no host answers /api/tags. A first draft of this step passed neither and
+      # would have failed every release — the env-var shortcut it used,
+      # OQP_OLLAMA__HOSTS__0__URL, is silently ignored because the override mechanism
+      # skips paths containing a list index. So a static file server stands in for
+      # Ollama: python's http.server maps GET /api/tags onto ./api/tags on disk, which
+      # is all the startup probe reads. Verified end to end before being committed.
+      - name: Smoke test — the container starts and serves /health
+        run: |
+          mkdir -p /tmp/fake-ollama/api
+          echo '{"models":[{"name":"llama3:8b"}]}' > /tmp/fake-ollama/api/tags
+          (cd /tmp/fake-ollama && python3 -m http.server 11434 --bind 127.0.0.1 &)
+
+          cat > /tmp/smoke-config.yml <<'EOF'
+          proxy:
+            host: "127.0.0.1"
+            port: 11435
+          ollama:
+            hosts:
+              - url: "http://127.0.0.1:11434"
+                name: "fake"
+          auth:
+            enabled: false
+          logging:
+            level: "info"
+            format: "text"
+          EOF
+
+          docker run -d --name oqp-smoke --network host \
+            -v /tmp/smoke-config.yml:/app/config.yml:ro \
+            -e OQP_CONFIG=/app/config.yml \
+            ollama-queue-proxy:verify
+
+          for _ in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:11435/health >/dev/null 2>&1; then
+              echo "health OK"
+              docker rm -f oqp-smoke
+              exit 0
+            fi
+            sleep 2
+          done
+
+          echo "::error::container never served /health"
+          docker logs oqp-smoke || true
+          docker rm -f oqp-smoke || true
+          exit 1
+
+      # ---- publish ------------------------------------------------------------------
+
+      - name: Build and push (multi-arch)
+        id: push
+        uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75 # v6.9.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # provenance: what built this, from which commit. sbom: what is inside it.
+          # Both are attached to the image in the registry, so a consumer can answer
+          # those questions without trusting this file.
+          provenance: true
+          sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Signed, and verifiable with `gh attestation verify`. The buildx `provenance:`
+      # flag above records the build; this attests it against the repository's OIDC
+      # identity, which is what makes it checkable by someone who does not trust the
+      # registry.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true

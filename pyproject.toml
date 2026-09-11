@@ -1,6 +1,6 @@
 [project]
 name = "ollama-queue-proxy"
-version = "0.3.3"
+version = "0.4.0"
 description = "Drop-in HTTP proxy for Ollama with priority queuing, per-client auth, and model-aware failover"
 readme = "README.md"
 license = { text = "MIT" }
@@ -58,10 +58,12 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
 source = ["src/ollama_queue_proxy"]
 
 [tool.coverage.report]
-# Measured 63% on 2026-09-11 (150 passed, 2 skipped) and set AT the measured value,
-# so the floor starts out honest rather than aspirational. CI did not measure coverage
-# at all before this change, which made any floor declared here inert.
+# Measured 75.82% on 2026-09-11 (219 passed, 2 skipped), raised from the 63% this
+# change started at. Set just below the measured figure so ordinary variation does not
+# flap the build, and never lowered to make a red build green — a floor that moves down
+# on demand records nothing.
 #
-# Raise this as coverage rises; never lower it to make a red build green. A floor that
-# moves down on demand records nothing.
-fail_under = 63
+# CI measures slightly higher than a local run (75.82 local vs ~76 in CI): the valkey
+# service container makes the two cache tests run that are skipped locally. The floor
+# is therefore set from the LOWER of the two.
+fail_under = 75

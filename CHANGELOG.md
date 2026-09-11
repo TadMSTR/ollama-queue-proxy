@@ -2,6 +2,47 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-11
+
+Repositions the project as **multi-tenant admission control for a shared Ollama** rather than a fleet pool manager, brings the repo to the fleet Baseline standard, and corrects four README claims the code did not implement. Tracker: vikunja#786 (folds in #236, #708).
+
+### Changed
+
+- **Positioning.** The README led with "smart pool manager for Ollama", competing on fleet routing against tools that do it better. It now leads with authenticated multi-tenant policy — priority bound to a credential and enforced server-side — which is the thing no comparable tool does: Olla has no inbound client auth at all, ollamaMQ keys priority off an unauthenticated `X-User-ID` header, and LiteLLM's `priority` is caller-declared, beta, and excludes embeddings. Routing and failover remain documented as supporting features.
+- **BREAKING (metric): `oqp_host_models_loaded` renamed to `oqp_host_models_installed`.** The old name said "loaded" (resident in VRAM, `/api/ps`) and reported models merely installed on disk (`/api/tags`). No alias is kept — verified that nothing on the reference deployment scrapes `/metrics` before renaming.
+- **`HostRoutingState.loaded_models` renamed to `installed_models`** for the same reason. The misleading name is why the gap went unnoticed: it matched what the README claimed, so nothing looked wrong.
+- **Host state unified into `RoutingTable`; `hosts.py` and `HostManager` are deleted.** The two structures tracked the same facts with different refresh rules and `proxy.py` selected through one while failing over through the other. `HostManager._health_loop` re-probed a host only `if not host.healthy`, so a host healthy at startup was never polled again and its model list was frozen for the process lifetime. `RoutingTable` was built only when `routing.strategy != "round_robin"` — and `round_robin` is the default, so the default deployment had no polling table at all. The routing table is now built unconditionally; strategy selects how `pick()` chooses, not whether host state exists.
+- **`pick()` prefers reachable hosts on the `round_robin` path too.** It previously passed every host, up or down, into weighted round-robin. When *no* host is reachable it now returns a candidate rather than `None`: reachability is a cached observation and a single failed poll against a recovered host should not black-hole the proxy into 503s.
+- **Management endpoints check authorization before validating input.** `?tier=bogus` from an unauthenticated caller returned 400 enumerating the valid tiers; it now returns 401.
+- Coverage floor raised from 63% to 75%, and CI now measures coverage at all — it previously ran `pytest` with none, which made any floor in `pyproject.toml` inert.
+
+### Added
+
+- **`key_env:` and `key_file:` for API keys.** Exactly one of `key` / `key_env` / `key_file` per entry. A literal in `config.yml` was previously the only option, and not by design: `_apply_env_overrides` skips any path with a numeric component, so `OQP_AUTH__KEYS__0__KEY` was silently ignored — the list index trips it. `key_file` strips trailing whitespace, since `echo secret > file` leaves a newline and a key differing by `\n` fails authentication silently. Missing, unreadable, doubled, absent or empty sources all fail at startup with a message naming the `client_id` and never the value. Resolved keys carry `repr=False` so they cannot reach a log through a traceback or debug dump. Builds the mechanism behind #426/#437/#26 — it does **not** resolve them; keys already in git history stay compromised until rotated.
+- **Metadata fast path.** `/api/tags`, `/api/version`, `/api/ps`, `/api/show` and `/` bypass the priority queue and the worker semaphore (they still authenticate). Every path previously entered the queue, so with a small `max_concurrent` a UI polling `/api/tags` queued behind a multi-minute generation and appeared to hang.
+- **`queue.max_queued_mb` (default 512)** — global cap on bytes waiting across all tiers. Depth limits bound the *number* of waiting requests, but each holds its whole body until dispatch, so the real ceiling was depth x body size. Requests are admitted regardless when the queues are empty, so a body larger than the cap cannot deadlock against a permanently unsatisfiable ceiling.
+- **Secret scanning as a CI gate (`secret-scan.yml`).** `.gitleaks.toml` had been present for months with nothing running it. Both halves of the requirement: a push/PR gate and a *scheduled* full-history scan with `fetch-depth: 0`. `tests/check_gitleaks_gate.py` plants secrets and requires detection, because "no leaks found" is what a working gate reports on a clean tree and what a broken one reports on any tree at all.
+- **Release hardening.** `release.yml` builds and verifies before publishing: the image is scanned with Trivy and smoke-tested (it is actually started, and must serve `/health`) before a multi-arch build is pushed with `provenance: true`, `sbom: true` and a signed build-provenance attestation. It previously built and pushed in one step, so anything wrong went wrong in public.
+- **Dockerfile applies OS security updates.** `python:3.12-slim` carried 4 fixable HIGH CVEs (openssl CVE-2026-14456; util-linux CVE-2026-53612/53613/53614) across 30 package instances as measured on 2026-09-11. Without this the new Trivy gate would fail on the first tag, and a check that has never passed gets bypassed rather than fixed.
+- CodeQL (`python` **and** `actions`), OSSF Scorecard, `.github/CODEOWNERS`, `.github/dependabot.yml` (uv/docker/github-actions), and a committed `uv.lock`.
+- Ruff now carries the eight fleet-mandated rule families and lints `tests/` as well as `src/`. This surfaced two real defects, both fixed: `asyncio.create_task` called twice without storing the handle (the loop holds only a weak reference, so a webhook delivery could be garbage-collected mid-flight), and a re-raise that dropped its cause.
+
+### Deprecated
+
+- **`ollama.health_check_interval`** drove the deleted `HostManager` loop and is no longer read; `ollama.hosts[].model_sync_interval` is now the only poll interval, and it polls every host rather than only unhealthy ones. Setting it logs a warning at startup rather than being silently ignored.
+
+### Fixed
+
+- Three dead assertions in the test suite, each asserted rather than deleted. The clearest read `assert key_with == key_with` beneath a comment claiming the opposite of the test's own name and docstring — nothing could ever contradict it.
+- `/queue/status` and `/metrics` host data now come from the unified routing table. The JSON keys `healthy` and `models` are unchanged: that is a consumed HTTP surface and an internal rename is not a reason to break it.
+
+### Documented
+
+- **Low-tier expiry semantics.** At `max_wait` a queued request is **not** promoted — it fails with `503 {"error": "request expired in queue"}` and no `Retry-After`. Confirmed by asserting the wire response rather than reading the raise site. Under sustained high-tier load the low tier does not merely wait, it errors.
+- **The auth-off caveat.** With `auth.enabled: false` — the shipped default and the quick-start path — `client_id` comes from a caller-supplied header and the priority ceiling is not applied, so any client can claim any identity and any priority, which also defeats the per-client concurrency caps. Correct by design, but it has to be stated.
+- **Model-aware routing routes on *installed*, not loaded, models.** Where every host has the same models pulled — the normal homelab case — `model_aware` has nothing to discriminate on and degenerates to weighted round-robin. The cold-start-avoidance claim is withdrawn until `/api/ps` routing lands (#787).
+- **The proxy does not rate-limit.** `RateLimitConfig` throttles failed authentication attempts per IP; there is no per-client request rate limit. Corrected in the README headline and at the `rate_limit:` key in `config.example.yml`, since the name is what made it misread.
+
 ## [0.3.3] - 2026-06-23
 
 ### Fixed

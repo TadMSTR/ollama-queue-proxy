@@ -49,13 +49,19 @@ async def _require_management(request: Request) -> JSONResponse | None:
 
 @router.post("/queue/pause")
 async def queue_pause(request: Request, tier: str | None = None):
+    # Authorization BEFORE input validation. Reversed, an unauthenticated caller
+    # probing these endpoints gets a 400 describing the accepted tier values rather
+    # than a 401 — answering a question it was never entitled to ask. The disclosure
+    # is small here (the tier names are in the README), but the ordering is the
+    # thing: a privileged endpoint should not evaluate attacker-supplied input
+    # before establishing who is asking.
+    err = await _require_management(request)
+    if err:
+        return err
     request_id = getattr(request.state, "request_id", "unknown")
     tier_err = _validate_tier(tier, request_id)
     if tier_err:
         return tier_err
-    err = await _require_management(request)
-    if err:
-        return err
     state: AppState = request.app.state.oqp
     state.queue_manager.pause(tier)
     return {"status": "paused", "tier": tier or "all"}
@@ -63,13 +69,14 @@ async def queue_pause(request: Request, tier: str | None = None):
 
 @router.post("/queue/resume")
 async def queue_resume(request: Request, tier: str | None = None):
+    # Authorization before input validation — see queue_pause.
+    err = await _require_management(request)
+    if err:
+        return err
     request_id = getattr(request.state, "request_id", "unknown")
     tier_err = _validate_tier(tier, request_id)
     if tier_err:
         return tier_err
-    err = await _require_management(request)
-    if err:
-        return err
     state: AppState = request.app.state.oqp
     state.queue_manager.resume(tier)
     return {"status": "resumed", "tier": tier or "all"}
@@ -87,13 +94,14 @@ async def queue_drain(request: Request):
 
 @router.post("/queue/flush")
 async def queue_flush(request: Request, tier: str | None = None):
+    # Authorization before input validation — see queue_pause.
+    err = await _require_management(request)
+    if err:
+        return err
     request_id = getattr(request.state, "request_id", "unknown")
     tier_err = _validate_tier(tier, request_id)
     if tier_err:
         return tier_err
-    err = await _require_management(request)
-    if err:
-        return err
     state: AppState = request.app.state.oqp
     dropped = await state.queue_manager.flush(tier)
     return {"status": "flushed", "tier": tier or "all", "dropped": dropped}
