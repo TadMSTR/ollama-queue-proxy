@@ -2,15 +2,11 @@
 
 from __future__ import annotations
 
-import os
-import sys
-import tempfile
-import textwrap
-
 import pytest
 import yaml
+from pydantic import ValidationError
 
-from ollama_queue_proxy.config import load_config
+from ollama_queue_proxy.config import ApiKeyConfig, load_config
 
 
 def write_config(tmp_path, data: dict) -> str:
@@ -21,11 +17,7 @@ def write_config(tmp_path, data: dict) -> str:
 
 
 def base_config() -> dict:
-    return {
-        "ollama": {
-            "hosts": [{"url": "http://ollama:11434", "name": "primary"}]
-        }
-    }
+    return {"ollama": {"hosts": [{"url": "http://ollama:11434", "name": "primary"}]}}
 
 
 def test_load_minimal_config(tmp_path):
@@ -134,9 +126,7 @@ def _config_with_auth_and_injection(port: int = 11436, inject_as: str = "svc") -
         "enabled": True,
         "keys": [{"key": "secret", "client_id": inject_as, "max_priority": "low"}],
     }
-    data["client_injection"] = {
-        "listeners": [{"listen_port": port, "inject_as": inject_as}]
-    }
+    data["client_injection"] = {"listeners": [{"listen_port": port, "inject_as": inject_as}]}
     return data
 
 
@@ -221,7 +211,8 @@ def test_injection_non_loopback_bind_with_allow_public_warns(tmp_path, capsys):
 
 
 def test_injection_non_loopback_bind_with_auth_and_allow_public_still_warns(tmp_path, capsys):
-    # auth.enabled=true does NOT silence the non-loopback warning — injection bypasses main-port auth.
+    # auth.enabled=true does NOT silence the non-loopback warning —
+    # injection bypasses main-port auth.
     data = _config_with_auth_and_injection()
     data["client_injection"]["listeners"][0]["bind"] = "192.168.1.50"
     data["client_injection"]["allow_public_injection"] = True
@@ -371,3 +362,211 @@ def test_env_override_embedding_cache_enabled(tmp_path, monkeypatch):
     monkeypatch.setenv("OQP_EMBEDDING_CACHE__ENABLED", "true")
     cfg = load_config(path)
     assert cfg.embedding_cache.enabled is True
+
+
+# ---------------------------------------------------------------------------
+# Non-literal API key sources (0.4.0)
+#
+# Before this, a literal in config.yml was the only option — and not by design.
+# _apply_env_overrides skips any path containing a numeric component, so
+# OQP_AUTH__KEYS__0__KEY is silently ignored; the list index is what trips it.
+# Everything else can come from the environment, which is why the gap was not
+# obvious: the mechanism works everywhere except the field that most needs it.
+# ---------------------------------------------------------------------------
+
+SECRET = "s3cr3t-resolved-key-not-a-literal-in-yaml"
+
+
+def _key_entry(**kwargs) -> dict:
+    base = {"client_id": "consumer", "max_priority": "normal"}
+    base.update(kwargs)
+    return base
+
+
+def test_literal_key_still_works():
+    """The live deployment has 11 literal keys and must keep loading unchanged."""
+    cfg = ApiKeyConfig(**_key_entry(key=SECRET))
+    assert cfg.key == SECRET
+
+
+def test_key_env_resolves_from_the_environment(monkeypatch):
+    monkeypatch.setenv("OQP_KEY_CONSUMER", SECRET)
+    cfg = ApiKeyConfig(**_key_entry(key_env="OQP_KEY_CONSUMER"))
+    assert cfg.key == SECRET
+
+
+def test_key_file_resolves_from_a_file(tmp_path):
+    f = tmp_path / "oqp-consumer"
+    f.write_text(SECRET)
+    cfg = ApiKeyConfig(**_key_entry(key_file=str(f)))
+    assert cfg.key == SECRET
+
+
+def test_key_file_strips_the_trailing_newline(tmp_path):
+    """`echo secret > file` and every secret manager that writes a file leave a
+    trailing newline. A key differing from the expected one by \\n fails
+    authentication with nothing in the logs explaining why."""
+    f = tmp_path / "oqp-consumer"
+    f.write_text(SECRET + "\n")
+    cfg = ApiKeyConfig(**_key_entry(key_file=str(f)))
+    assert cfg.key == SECRET
+
+
+def test_exactly_one_source_required_none_given():
+    with pytest.raises(ValidationError, match="set exactly one of key, key_env or key_file"):
+        ApiKeyConfig(**_key_entry())
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"key": SECRET, "key_env": "OQP_KEY_CONSUMER"},
+        {"key": SECRET, "key_file": "/run/secrets/x"},
+        {"key_env": "OQP_KEY_CONSUMER", "key_file": "/run/secrets/x"},
+    ],
+)
+def test_exactly_one_source_required_two_given(kwargs):
+    with pytest.raises(ValidationError, match="set exactly one of key, key_env or key_file"):
+        ApiKeyConfig(**_key_entry(**kwargs))
+
+
+def test_missing_env_var_fails_fast_naming_the_client(monkeypatch):
+    monkeypatch.delenv("OQP_KEY_ABSENT", raising=False)
+    with pytest.raises(ValidationError) as exc:
+        ApiKeyConfig(**_key_entry(key_env="OQP_KEY_ABSENT"))
+    assert "consumer" in str(exc.value), "the message must name the client_id"
+    assert "OQP_KEY_ABSENT" in str(exc.value)
+
+
+def test_unreadable_key_file_fails_fast_naming_the_client(tmp_path):
+    with pytest.raises(ValidationError) as exc:
+        ApiKeyConfig(**_key_entry(key_file=str(tmp_path / "does-not-exist")))
+    assert "consumer" in str(exc.value)
+
+
+@pytest.mark.parametrize("value", ["", "   ", "\n"])
+def test_empty_resolved_key_is_rejected(monkeypatch, value):
+    """An empty credential authenticates no one and is never intentional. Without
+    this an unset-but-present env var yields a key of "" that silently matches
+    nothing, which reads as 'auth is broken' rather than 'config is wrong'."""
+    monkeypatch.setenv("OQP_KEY_EMPTY", value)
+    with pytest.raises(ValidationError, match="empty key"):
+        ApiKeyConfig(**_key_entry(key_env="OQP_KEY_EMPTY"))
+
+
+def test_error_messages_never_contain_the_resolved_key(monkeypatch, tmp_path):
+    """A message that echoes the key to explain the key is wrong puts the credential
+    in the log the operator is about to paste into a chat window."""
+    monkeypatch.setenv("OQP_KEY_CONSUMER", SECRET)
+    with pytest.raises(ValidationError) as exc:
+        ApiKeyConfig(**_key_entry(key=SECRET, key_env="OQP_KEY_CONSUMER"))
+    assert SECRET not in str(exc.value)
+
+
+def test_resolved_key_is_absent_from_repr(monkeypatch):
+    """repr() reaches logs through tracebacks, debug prints and pydantic's own
+    validation errors quoting the model — none of which are deliberate logging."""
+    monkeypatch.setenv("OQP_KEY_CONSUMER", SECRET)
+    cfg = ApiKeyConfig(**_key_entry(key_env="OQP_KEY_CONSUMER"))
+    assert SECRET not in repr(cfg)
+    assert SECRET not in str(cfg)
+
+
+def test_resolved_key_never_reaches_logs_at_debug(monkeypatch, tmp_path):
+    """A resolved credential must not appear in log output at the most verbose level.
+
+    Deliberately NOT written with `caplog.at_level`. That helper installs its own
+    handler and forces a level, so it reports what logging *would* emit under a
+    configuration the application never uses — a test that passes while production
+    is silent, or passes while production is loud. This drives the app's own
+    `_configure_logging` with `level: debug` and captures what that configuration
+    actually produces.
+
+    The positive control at the end is the part that makes the negative assertion
+    mean anything: it proves this harness can see a DEBUG record at all. Without it
+    a capture that silently collected nothing — a propagate=False somewhere, a
+    handler on the wrong logger — would report "the key is not in the logs" for the
+    same reason it would report that about any string whatsoever.
+    """
+    import io
+    import logging
+
+    from ollama_queue_proxy.auth import AuthManager
+    from ollama_queue_proxy.config import Config
+    from ollama_queue_proxy.main import _configure_logging
+
+    monkeypatch.setenv("OQP_KEY_CONSUMER", SECRET)
+    cfg_path = write_config(
+        tmp_path,
+        {
+            **base_config(),
+            "logging": {"level": "debug", "format": "text"},
+            "auth": {
+                "enabled": True,
+                "keys": [{"key_env": "OQP_KEY_CONSUMER", "client_id": "consumer"}],
+            },
+        },
+    )
+
+    root = logging.getLogger()
+    original_level = root.level
+    original_handlers = root.handlers[:]
+    stream = io.StringIO()
+    try:
+        config: Config = load_config(cfg_path)
+        assert config.auth.keys[0].key == SECRET, "precondition: the key did resolve"
+
+        _configure_logging(config)
+        handler = logging.StreamHandler(stream)
+        handler.setLevel(logging.DEBUG)
+        root.addHandler(handler)
+        root.setLevel(logging.DEBUG)
+
+        # Exercise the paths that hold the credential: construction, a successful
+        # match, and a failed one. A rejection handler echoing the presented key is
+        # the most likely way this leaks.
+        mgr = AuthManager(config.auth)
+        assert mgr.lookup_key(SECRET) is not None
+        assert mgr.lookup_key("wrong-key-entirely") is None
+
+        logging.getLogger("ollama_queue_proxy").debug("config loaded: %r", config.auth)
+
+        captured = stream.getvalue()
+        assert SECRET not in captured, "the resolved API key reached the logs at DEBUG"
+
+        # CONTROL — see the docstring.
+        logging.getLogger("ollama_queue_proxy").debug("canary-%s", "9f3ac1")
+        assert "canary-9f3ac1" in stream.getvalue(), (
+            "the capture saw no DEBUG output at all, so the assertion above proved nothing"
+        )
+    finally:
+        root.handlers[:] = original_handlers
+        root.setLevel(original_level)
+
+
+def test_world_readable_key_file_warns(tmp_path):
+    """NE-05. A credential in a 0644 file is exposed to every local user and nothing
+    else in the system would ever mention it."""
+    import os
+
+    f = tmp_path / "oqp-consumer"
+    f.write_text(SECRET)
+    os.chmod(f, 0o644)
+    with pytest.warns(UserWarning, match="readable beyond its owner"):
+        cfg = ApiKeyConfig(**_key_entry(key_file=str(f)))
+    assert cfg.key == SECRET, "the warning must not stop the key resolving"
+
+
+def test_owner_only_key_file_does_not_warn(tmp_path):
+    """CONTROL: warning on a correctly-permissioned file would fire for every
+    well-configured deployment, which trains people to ignore the warning."""
+    import os
+    import warnings as _w
+
+    f = tmp_path / "oqp-consumer"
+    f.write_text(SECRET)
+    os.chmod(f, 0o600)
+    with _w.catch_warnings():
+        _w.simplefilter("error")  # any warning becomes an exception
+        cfg = ApiKeyConfig(**_key_entry(key_file=str(f)))
+    assert cfg.key == SECRET

@@ -1,14 +1,10 @@
 """Tests for the OpenAI-compat embedding translation layer (openai_compat.py)."""
 
-import pytest
-
 from ollama_queue_proxy.openai_compat import (
-    _OPENAI_COMPAT_PATHS,
     is_openai_compat_path,
     rewrite_path,
     wrap_response,
 )
-
 
 # ── path detection ────────────────────────────────────────────────────────────
 

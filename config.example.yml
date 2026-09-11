@@ -42,10 +42,24 @@ ollama:
     #   name: "secondary"
     #   weight: 1
     #   model_sync_interval: 30
-  health_check_interval: 30  # seconds between recovery checks on unhealthy hosts
+  # DEPRECATED in 0.4.0 and no longer read. It drove a second host-health loop that
+  # has been removed; ollama.hosts[].model_sync_interval is now the only poll interval,
+  # and it polls every host rather than only unhealthy ones. Setting this logs a
+  # warning at startup. Left here, commented, so an operator upgrading finds the note
+  # rather than silently losing the behaviour they configured.
+  # health_check_interval: 30
   request_timeout: 300       # seconds before upstream timeout
 
 queue:
+  # Total bytes allowed to sit in the queue across all tiers. Depth limits bound the
+  # NUMBER of waiting requests; a queued request holds its whole body until dispatch,
+  # so this is what bounds memory. Over the cap the proxy answers 503 + Retry-After.
+  #
+  # Exemption: when the queues are empty a request is admitted even if its body alone
+  # exceeds the cap, so an oversized body cannot deadlock against a permanently
+  # unsatisfiable ceiling.
+  max_queued_mb: 512
+
   high:
     max_depth: 50
     max_wait: 120            # seconds before stale request is dropped
@@ -95,6 +109,23 @@ auth:
   #   max_priority: low
   #   management: false
   #   max_concurrent: 2            # cap batch client at 2 concurrent
+  # Each entry needs EXACTLY ONE of key / key_env / key_file:
+  #
+  #   key:      "literal"                    literal in this file
+  #   key_env:  OQP_KEY_SEARXNG              read from the environment
+  #   key_file: /run/secrets/oqp-searxng     read from a file (trailing \n stripped)
+  #
+  # key_env / key_file exist because OQP_AUTH__KEYS__0__KEY does NOT work: the env
+  # override mechanism skips any path with a numeric component, and the list index
+  # trips it. A literal here was the only option until 0.4.0 by accident, not design.
+  #
+  # Startup fails with a message naming the client_id (never the value) if a source is
+  # missing, unreadable, doubled, absent, or resolves to empty.
+
+  # This throttles FAILED AUTHENTICATION ATTEMPTS PER IP. It is not a request rate
+  # limit: an authenticated client can send as many requests as it likes, bounded by
+  # the queue and its max_concurrent, not by this. Named `rate_limit` for historical
+  # reasons; read it as "auth brute-force throttle".
   rate_limit:
     max_failures: 10         # consecutive auth failures per IP before 429
     window_seconds: 60       # rolling window for failure counting
@@ -130,8 +161,16 @@ logging:
 # ---------------------------------------------------------------------------
 # NEW v0.2.0 — Model-aware routing
 # ---------------------------------------------------------------------------
-# Route requests to the Ollama host that already has the target model loaded.
-# Polling uses ollama.hosts[].model_sync_interval (per host, default 30s).
+# Route requests to an Ollama host that already has the target model INSTALLED.
+#
+# Installed, not loaded. The router reads /api/tags (models on disk), not /api/ps
+# (models resident in VRAM). This avoids picking a host that would have to pull the
+# model; it does NOT avoid cold-start latency. Where every host has the same models
+# pulled, model_aware has nothing to discriminate on and behaves as weighted
+# round-robin.
+#
+# Polling uses ollama.hosts[].model_sync_interval (per host, default 30s), and polls
+# every host on every interval regardless of current reachability.
 # Weighted round-robin is deterministic: weight=2 means 2 requests per 1 for weight=1.
 #
 # Startup: probes all hosts via /api/tags once before accepting requests.
@@ -141,7 +180,7 @@ logging:
 #
 # routing:
 #   strategy: model_aware            # model_aware | round_robin (default: round_robin)
-#   fallback: any_healthy            # when no host has the model loaded: pick any healthy host
+#   fallback: any_healthy            # when no host has the model installed: pick any reachable host
 #   model_poll_timeout: 3            # seconds for each /api/tags poll
 
 # ---------------------------------------------------------------------------

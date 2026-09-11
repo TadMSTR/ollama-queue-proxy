@@ -7,10 +7,9 @@ import json
 
 import pytest
 
+from ollama_queue_proxy.concurrency import FAIRNESS_MAX_REENTRIES, ClientConcurrencyManager
 from ollama_queue_proxy.config import ApiKeyConfig
-from ollama_queue_proxy.concurrency import ClientConcurrencyManager, FAIRNESS_MAX_REENTRIES
 from ollama_queue_proxy.main import _inject_keep_alive
-
 
 # ---------------------------------------------------------------------------
 # keep_alive injection
@@ -189,10 +188,12 @@ async def test_fairness_bypass_after_max_reentries():
 
 @pytest.mark.asyncio
 async def test_different_clients_independent_semaphores():
-    mgr = ClientConcurrencyManager([
-        make_key("batch", max_concurrent=1),
-        make_key("interactive", max_concurrent=2),
-    ])
+    mgr = ClientConcurrencyManager(
+        [
+            make_key("batch", max_concurrent=1),
+            make_key("interactive", max_concurrent=2),
+        ]
+    )
 
     await mgr.acquire("batch")  # fill batch cap
 

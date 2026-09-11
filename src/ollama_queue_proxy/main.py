@@ -7,9 +7,9 @@ import json
 import logging
 import logging.config
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -20,11 +20,17 @@ from .auth import AuthManager
 from .cache import EmbeddingCache
 from .concurrency import ClientConcurrencyManager
 from .config import Config, load_config
-from .hosts import HostManager
 from .middleware import RequestContextMiddleware, get_client_id, parse_priority
 from .openai_compat import is_openai_compat_path, rewrite_path, wrap_response
 from .proxy import dispatch_request, read_body
-from .queue import PriorityQueueManager, QueueFull, QueueItem, QueuePaused, RequestExpired
+from .queue import (
+    PriorityQueueManager,
+    QueueFull,
+    QueueItem,
+    QueueOverCapacity,
+    QueuePaused,
+    RequestExpired,
+)
 from .routes.queue import router as queue_router
 from .routes.status import router as status_router
 from .routing import RoutingTable
@@ -37,14 +43,13 @@ logger = logging.getLogger(__name__)
 class AppState:
     config: Config
     auth_manager: AuthManager
-    host_manager: HostManager
     queue_manager: PriorityQueueManager
     webhook_manager: WebhookManager
     http_client: httpx.AsyncClient
-    routing_table: RoutingTable | None = None
+    routing_table: RoutingTable
     embedding_cache: EmbeddingCache | None = None
     concurrency_manager: ClientConcurrencyManager | None = None
-    start_time: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    start_time: datetime = field(default_factory=lambda: datetime.now(UTC))
     client_stats: dict[str, dict[str, Any]] = field(default_factory=dict)
     shutting_down: bool = False
 
@@ -81,13 +86,13 @@ async def lifespan(app: FastAPI):
             validate_webhook_url(config.webhooks.url, config.webhooks.allowed_hosts)
         except ValueError as e:
             import sys
+
             print(f"FATAL: {e}", file=sys.stderr)
             sys.exit(1)
 
     _warn_open_binding(config)
 
     http_client = httpx.AsyncClient()
-    host_manager = HostManager(config.ollama)
     auth_manager = AuthManager(config.auth)
     queue_manager = PriorityQueueManager(config.queue, config.proxy.max_concurrent)
     webhook_manager = WebhookManager(config.webhooks, http_client)
@@ -107,11 +112,12 @@ async def lifespan(app: FastAPI):
             "rejected": 0,
         }
 
-    # Build routing table if model-aware strategy is configured
-    routing_table: RoutingTable | None = None
-    if config.routing.strategy != "round_robin":
-        routing_table = RoutingTable(config.ollama, config.routing, http_client)
-        await routing_table.startup_probe()
+    # Built unconditionally. It is the only per-host state there is; `routing.strategy`
+    # selects how pick() chooses, not whether host state exists. Building it only for
+    # model_aware was what left the DEFAULT (round_robin) deployment with no background
+    # host polling at all — see the module docstring in routing.py.
+    routing_table = RoutingTable(config.ollama, config.routing, http_client)
+    await routing_table.startup_probe()
 
     # Build embedding cache if enabled
     embedding_cache: EmbeddingCache | None = None
@@ -126,7 +132,6 @@ async def lifespan(app: FastAPI):
     state = AppState(
         config=config,
         auth_manager=auth_manager,
-        host_manager=host_manager,
         queue_manager=queue_manager,
         webhook_manager=webhook_manager,
         http_client=http_client,
@@ -138,11 +143,8 @@ async def lifespan(app: FastAPI):
     app.state.oqp = state
     set_shared_state(state)  # make available to injection apps
 
-    await host_manager.startup_check(http_client)
     queue_manager.start_workers()
-    await host_manager.start_background_checks(http_client)
-    if routing_table:
-        routing_table.start_background_pollers()
+    routing_table.start_background_pollers()
 
     logger.info(
         "ollama-queue-proxy started host=%s port=%d auth=%s injection_listeners=%d",
@@ -162,13 +164,11 @@ async def lifespan(app: FastAPI):
     logger.info("shutdown: draining in-flight requests (timeout=%ds)", drain_timeout)
     try:
         await asyncio.wait_for(queue_manager.drain(), timeout=drain_timeout)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.warning("shutdown: drain timeout after %ds", drain_timeout)
 
     await queue_manager.stop_workers()
-    await host_manager.stop()
-    if routing_table:
-        await routing_table.stop()
+    await routing_table.stop()
     if embedding_cache:
         await embedding_cache.close()
     await http_client.aclose()
@@ -188,9 +188,21 @@ app.include_router(status_router)
 app.include_router(queue_router)
 
 
-_KEEP_ALIVE_PATHS = frozenset({
-    "/api/generate", "/api/chat", "/api/embed", "/api/embeddings"
-})
+_KEEP_ALIVE_PATHS = frozenset({"/api/generate", "/api/chat", "/api/embed", "/api/embeddings"})
+
+# Metadata reads: no inference cost, so no reason to spend an admission decision on
+# them. These bypass the priority queue and the worker semaphore entirely.
+#
+# They did not before, and the effect was visible: with max_concurrent small (it is 2
+# on the deployment this was found on), a UI polling /api/tags queued behind whatever
+# multi-minute generation happened to be running, and appeared to hang. Policy
+# machinery must not block reads that cost nothing to serve.
+#
+# These still AUTHENTICATE — the bypass is of the queue, not of the auth check, which
+# runs before this point in proxy_handler. What is given up is the per-client
+# concurrency cap on these paths; the ceiling that remains is the shared httpx
+# connection pool, and these are cheap reads against a local daemon.
+_METADATA_FAST_PATH = frozenset({"/api/tags", "/api/version", "/api/ps", "/api/show", "/"})
 
 
 def _inject_keep_alive(body: bytes, cfg_default: str, override: bool, max_body_mb: int) -> bytes:
@@ -241,9 +253,24 @@ async def _enqueue_request(
     if body_err:
         return body_err
 
+    path = path_override if path_override is not None else request.url.path
+
+    # Metadata fast path — straight to dispatch, no queue, no semaphore. Placed here
+    # rather than in proxy_handler so the injection ports get it too: they share this
+    # function precisely so queue behaviour cannot diverge between the two entry points.
+    if path in _METADATA_FAST_PATH:
+        return await dispatch_request(
+            request=request,
+            body=body,
+            client_id=client_id,
+            config=state.config,
+            client=state.http_client,
+            routing_table=state.routing_table,
+            path_override=path_override,
+        )
+
     # keep_alive injection — runs before cache check so cached responses also reflect
     # the injected value (though for embeddings keep_alive has no effect upstream)
-    path = path_override if path_override is not None else request.url.path
     ka_cfg = state.config.keep_alive
     if path in _KEEP_ALIVE_PATHS:
         body = _inject_keep_alive(
@@ -262,9 +289,7 @@ async def _enqueue_request(
         if isinstance(parsed, dict):
             cache_body_data = parsed
             cache_model = extract_model(body) or ""
-            cached = await state.embedding_cache.get(
-                path, cache_body_data, cache_model, client_id
-            )
+            cached = await state.embedding_cache.get(path, cache_body_data, cache_model, client_id)
             if cached is not None:
                 # Cache hit — still track stats, skip queue
                 if client_id:
@@ -295,7 +320,6 @@ async def _enqueue_request(
                 body=body,
                 client_id=client_id,
                 config=state.config,
-                host_manager=state.host_manager,
                 client=state.http_client,
                 routing_table=state.routing_table,
                 path_override=path_override,
@@ -310,6 +334,7 @@ async def _enqueue_request(
         request_id=request_id,
         future=future,
         dispatch_fn=dispatch_fn,
+        nbytes=len(body) if body else 0,
     )
 
     try:
@@ -324,6 +349,18 @@ async def _enqueue_request(
         return JSONResponse(
             status_code=e.status_code,
             content={"error": "queue full", "request_id": request_id},
+            headers={"Retry-After": str(retry_after)},
+        )
+    except QueueOverCapacity as e:
+        retry_after = state.queue_manager.retry_after(e.tier)
+        if client_id:
+            cs = state.client_stats.setdefault(
+                client_id, {"description": None, "processed": 0, "rejected": 0}
+            )
+            cs["rejected"] = cs.get("rejected", 0) + 1
+        return JSONResponse(
+            status_code=e.status_code,
+            content={"error": "queue over capacity (bytes)", "request_id": request_id},
             headers={"Retry-After": str(retry_after)},
         )
     except QueuePaused as e:
@@ -362,12 +399,11 @@ async def _enqueue_request(
         and response.status_code == 200
         and isinstance(response, JSONResponse)
     ):
-        try:
+        # Never fail a user request because of a cache write error.
+        with suppress(Exception):
             await state.embedding_cache.set(
                 path, cache_body_data, cache_model, response.body, client_id
             )
-        except Exception:
-            pass  # never fail a user request due to cache write errors
 
     response.headers["X-Queue-Wait-Time"] = str(wait_ms)
     if waited:
@@ -466,12 +502,12 @@ def run():
                 listener.bind,
             )
 
-    all_servers = [main_server] + injection_servers
+    all_servers = [main_server, *injection_servers]
 
     async def serve_all():
         tasks = [asyncio.create_task(s.serve()) for s in all_servers]
         # When any server exits (e.g. SIGTERM to main), signal all to stop
-        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        _done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         for s in all_servers:
             s.should_exit = True
         if pending:

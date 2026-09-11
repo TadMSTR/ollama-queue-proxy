@@ -74,9 +74,7 @@ def make_injection_app(inject_as: str, key_cfg: ApiKeyConfig) -> FastAPI:
         requested_priority = parse_priority(request)
         from .auth import PRIORITY_ORDER
 
-        if PRIORITY_ORDER.get(requested_priority, 0) > PRIORITY_ORDER.get(
-            key_cfg.max_priority, 1
-        ):
+        if PRIORITY_ORDER.get(requested_priority, 0) > PRIORITY_ORDER.get(key_cfg.max_priority, 1):
             tier = key_cfg.max_priority
         else:
             tier = requested_priority

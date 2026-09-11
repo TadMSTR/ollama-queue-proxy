@@ -91,7 +91,8 @@ class ClientConcurrencyManager:
             state.inflight += 1
             logger.debug(
                 "concurrency.fairness_bypass client_id=%s reentries=%d",
-                client_id, reentries,
+                client_id,
+                reentries,
             )
             return
         await state.acquire()

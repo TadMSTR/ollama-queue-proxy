@@ -4,15 +4,14 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 import httpx
 from fastapi import Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .config import Config
-from .hosts import HostManager, OllamaHost
-from .routing import RoutingTable
+from .routing import HostRoutingState, RoutingTable
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +85,7 @@ async def read_body(request: Request, max_mb: int) -> tuple[bytes, JSONResponse 
 
 
 async def _proxy_to_host(
-    host: OllamaHost,
+    host: HostRoutingState,
     method: str,
     path: str,
     query: str,
@@ -122,9 +121,8 @@ async def dispatch_request(
     body: bytes,
     client_id: str | None,
     config: Config,
-    host_manager: HostManager,
     client: httpx.AsyncClient,
-    routing_table: RoutingTable | None = None,
+    routing_table: RoutingTable,
     path_override: str | None = None,
 ) -> StreamingResponse | JSONResponse:
     """
@@ -159,25 +157,12 @@ async def dispatch_request(
 
     model = extract_model(body)
 
-    # Build candidate host list — routing table (model_aware) or HostManager fallback
-    def _next_host() -> OllamaHost | None:
-        if routing_table is not None:
-            rt_state = routing_table.pick(model)
-            if rt_state is None:
-                return None
-            # Map routing state back to OllamaHost object for failover tracking
-            for h in host_manager.hosts:
-                if h.name == rt_state.name:
-                    return h
-            return None
-        # Default: first healthy host (HostManager order, v0.1.x behaviour)
-        for h in host_manager.hosts:
-            if not h.healthy:
-                continue
-            if model and h.models and model not in h.models:
-                continue
-            return h
-        return None
+    # One structure. This used to pick through RoutingTable and then map the result
+    # back to a HostManager object by name to track failover against it, with a second
+    # selection path for when no routing table existed — three ways to answer one
+    # question, kept in step by hand.
+    def _next_host() -> HostRoutingState | None:
+        return routing_table.pick(model)
 
     last_error: str | None = None
     attempted: set[str] = set()
@@ -200,7 +185,7 @@ async def dispatch_request(
 
             # Fast-path routing invalidation: if Ollama says the model isn't loaded,
             # remove it from the routing table immediately so next request routes elsewhere.
-            if resp.status_code == 404 and model and routing_table is not None:
+            if resp.status_code == 404 and model:
                 try:
                     err_body = resp.json()
                     if "not found" in err_body.get("error", "").lower():
@@ -222,8 +207,7 @@ async def dispatch_request(
             # true streaming responses.
             content_type = resp.headers.get("content-type", "")
             is_streaming = (
-                "text/event-stream" in content_type
-                or "application/x-ndjson" in content_type
+                "text/event-stream" in content_type or "application/x-ndjson" in content_type
             )
 
             response_headers = {
@@ -231,6 +215,7 @@ async def dispatch_request(
             }
 
             if is_streaming:
+
                 async def stream_gen(r=resp):
                     try:
                         async for chunk in r.aiter_bytes():
@@ -253,7 +238,8 @@ async def dispatch_request(
             else:
                 ct = resp.headers.get("content-type", "")
                 passthrough_headers = {
-                    k: v for k, v in resp.headers.items()
+                    k: v
+                    for k, v in resp.headers.items()
                     if k.lower() not in _STRIP_RESPONSE_HEADERS
                 }
                 return JSONResponse(
@@ -264,12 +250,10 @@ async def dispatch_request(
 
         except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPStatusError) as e:
             last_error = str(e)
-            host_manager.mark_unhealthy(host, last_error)
-            if routing_table is not None:
-                # Mark host unreachable in routing table too
-                rt_state = routing_table._states.get(host.name)
-                if rt_state:
-                    rt_state.reachable = False
+            # One call, one structure. Previously this marked the host unhealthy in
+            # HostManager and then separately reached into RoutingTable._states to set
+            # `reachable`, leaving two flags to be kept in agreement by hand.
+            routing_table.mark_unhealthy(host, last_error)
             logger.warning(
                 "proxy.failover host=%s error=%s trying_next=true", host.name, last_error
             )

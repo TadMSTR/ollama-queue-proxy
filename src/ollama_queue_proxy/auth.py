@@ -69,7 +69,7 @@ class AuthManager:
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
-        provided_key = auth_header[len("Bearer "):]
+        provided_key = auth_header[len("Bearer ") :]
         key_cfg = self.lookup_key(provided_key)
         if key_cfg is None:
             await self._record_failure(client_ip)

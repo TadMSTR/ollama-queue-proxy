@@ -1,0 +1,68 @@
+# CodeQL — F3.
+#
+# The conformance checker only greps workflow FILENAMES for "codeql", so a file with
+# this name and an empty job would pass F3 while analysing nothing. That is worth
+# stating plainly because it is the exact shape of the problem this build is fixing
+# elsewhere: `.gitleaks.toml` existed for months with no job running it, and the repo
+# looked protected. The content below is what does the work; the filename only satisfies
+# the grep.
+#
+# TWO LANGUAGES:
+#
+#   python  — the application.
+#   actions — the workflows themselves. Left out, the analysis cannot see script
+#             injection through `${{ }}` interpolation or an over-permissioned token,
+#             and those live in exactly the files a security scan is assumed to cover.
+#
+# `security-and-quality` rather than the default `security` suite: the default query
+# pack is tuned to keep false positives near zero on enormous codebases. This one is
+# ~1,400 statements and can afford to read a few more results.
+
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly. A scheduled run is not redundant with the push trigger: CodeQL's query
+    # packs are updated continuously, so the same unchanged code is re-analysed against
+    # rules that did not exist when it last landed.
+    - cron: "41 5 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      # Job-scoped rather than top-level: only this job writes results, and
+      # security-events: write is the permission that lets a workflow publish into the
+      # repository's security tab.
+      security-events: write
+      contents: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        language: ["python", "actions"]
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-and-quality
+
+      # No build step. Python and actions are both interpreted, so CodeQL extracts
+      # directly from source — an autobuild step here would be a no-op that occasionally
+      # fails for its own reasons.
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        with:
+          category: "/language:${{ matrix.language }}"

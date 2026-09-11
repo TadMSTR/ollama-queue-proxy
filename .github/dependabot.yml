@@ -1,0 +1,57 @@
+# Dependabot configuration — F1.
+#
+# This arrives in the same change as uv.lock (F5), and that pairing is not incidental.
+# A committed lockfile with nothing maintaining it is a *freeze*, not an improvement:
+# pinned-and-forgotten is a different failure, not the absence of one (vikunja#670).
+# Do not land one without the other.
+#
+# THREE ecosystems:
+#
+# `uv`, NOT `pip`. They are separate ecosystems in Dependabot and the distinction is
+# load-bearing — `pip` would update pyproject.toml and leave uv.lock frozen, which is
+# precisely the stale-lock failure above wearing the appearance of coverage.
+#
+# `docker` — this repo ships a Dockerfile and publishes to GHCR. Its base image is the
+# thing most likely to accumulate CVEs while nothing in the repo changes at all.
+#
+# `github-actions` — every action in .github/workflows/ is SHA-pinned with a trailing
+# version comment. Dependabot understands SHA pins and bumps the SHA while updating the
+# comment, so pinning costs no update coverage.
+#
+# Majors are ignored everywhere. A semver-major bump is a reading task, not a merge
+# task; take one by hand against the upstream changelog.
+version: 2
+
+updates:
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    # Dev dependencies batch into one PR — they move often and none of them ship in the
+    # runtime image, so one PR per bump would bury the runtime updates worth reading.
+    # `ruff` is deliberately pinned exactly (==) in pyproject.toml because
+    # `ruff format --check` is a gate; Dependabot will still propose the bump, and
+    # taking it stays a decision.
+    groups:
+      dev-dependencies:
+        dependency-type: "development"
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]

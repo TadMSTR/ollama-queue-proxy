@@ -64,7 +64,7 @@ def test_rejects_file_scheme():
 
 
 def test_rejects_localhost_hostname():
-    with pytest.raises(ValueError, match="private|SSRF"):
+    with pytest.raises(ValueError, match=r"private|SSRF"):
         validate_webhook_url("http://localhost/webhook")
 
 

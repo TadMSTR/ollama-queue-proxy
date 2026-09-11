@@ -1,5 +1,16 @@
-# Config with real keys — never commit
+# Secrets — never commit. B6 requires patterns for each of these shapes, not just
+# the one file this repo happens to use today: an operator who writes credentials to
+# .env or drops a PEM in the tree gets no warning from a config.yml-only rule.
 config.yml
+.env
+.env.*
+*.key
+*.pem
+
+# Core dumps. A crash dump of this process contains the resolved API keys in
+# memory, so it is a credential file that does not look like one (SC-02).
+core.*
+*.core
 
 # Python
 __pycache__/

@@ -2,19 +2,15 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from ollama_queue_proxy.cache import (
     CACHEABLE_PATHS,
     EmbeddingCache,
-    _cache_key,
     _embed_key,
     _embeddings_key,
-    hits,
-    misses,
-    errors,
 )
 from ollama_queue_proxy.config import EmbeddingCacheConfig
 
@@ -105,9 +101,8 @@ async def test_startup_exits_on_unreachable_backend():
     mock_client = AsyncMock()
     mock_client.ping.side_effect = Exception("connection refused")
 
-    with patch("redis.asyncio.from_url", return_value=mock_client):
-        with pytest.raises(SystemExit):
-            await cache.startup()
+    with patch("redis.asyncio.from_url", return_value=mock_client), pytest.raises(SystemExit):
+        await cache.startup()
 
 
 @pytest.mark.asyncio

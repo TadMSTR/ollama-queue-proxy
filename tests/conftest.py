@@ -2,21 +2,18 @@
 
 from __future__ import annotations
 
-import pytest
-from fastapi.testclient import TestClient
-
 from ollama_queue_proxy.config import (
     ApiKeyConfig,
     AuthConfig,
     Config,
     HostConfig,
+    LoggingConfig,
     OllamaConfig,
     ProxyConfig,
     QueueConfig,
     RateLimitConfig,
     TierConfig,
     WebhookConfig,
-    LoggingConfig,
 )
 
 
@@ -27,7 +24,9 @@ def make_config(
     max_concurrent: int = 2,
 ) -> Config:
     return Config(
-        proxy=ProxyConfig(max_concurrent=max_concurrent, allow_model_management=allow_model_management),
+        proxy=ProxyConfig(
+            max_concurrent=max_concurrent, allow_model_management=allow_model_management
+        ),
         ollama=OllamaConfig(hosts=[HostConfig(url="http://ollama-test:11434", name="test")]),
         queue=QueueConfig(
             high=TierConfig(max_depth=5, max_wait=10),
@@ -39,7 +38,9 @@ def make_config(
             enabled=auth_enabled,
             keys=keys or [],
             rate_limit=RateLimitConfig(max_failures=5, window_seconds=60),
-        ) if not (auth_enabled and not keys) else AuthConfig(enabled=False),
+        )
+        if not (auth_enabled and not keys)
+        else AuthConfig(enabled=False),
         logging=LoggingConfig(level="error", format="text"),
     )
 

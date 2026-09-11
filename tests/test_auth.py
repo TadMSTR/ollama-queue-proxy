@@ -7,7 +7,7 @@ import pytest
 from ollama_queue_proxy.auth import AuthManager
 from ollama_queue_proxy.config import AuthConfig, RateLimitConfig
 
-from .conftest import ADMIN_KEY, ADMIN_KEY_CFG, LOW_KEY, LOW_KEY_CFG, USER_KEY, USER_KEY_CFG
+from .conftest import ADMIN_KEY, ADMIN_KEY_CFG, LOW_KEY_CFG, USER_KEY_CFG
 
 
 def make_auth(enabled: bool = True, keys=None) -> AuthManager:

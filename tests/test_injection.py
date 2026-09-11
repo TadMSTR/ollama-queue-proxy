@@ -2,20 +2,15 @@
 
 from __future__ import annotations
 
-import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 from fastapi.testclient import TestClient
 
 from ollama_queue_proxy.config import (
     ApiKeyConfig,
-    ClientInjectionConfig,
-    InjectionListenerConfig,
 )
 from ollama_queue_proxy.injection import make_injection_app, set_shared_state
 from ollama_queue_proxy.proxy import _STRIP_REQUEST_HEADERS
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -32,7 +27,6 @@ def make_key_cfg(client_id: str = "memsearch", max_priority: str = "low") -> Api
 
 def _make_mock_state(response_body: dict | None = None):
     """Build a minimal mock AppState that the injection handler can use."""
-    from fastapi.responses import JSONResponse
 
     mock_state = MagicMock()
     mock_state.shutting_down = False
@@ -66,8 +60,10 @@ def test_injection_app_responds_without_auth(tmp_path):
     """Injection port must accept requests with no Authorization header."""
     key_cfg = make_key_cfg()
 
-    with patch("ollama_queue_proxy.injection._shared_state") as mock_ref, \
-         patch("ollama_queue_proxy.main._enqueue_request", new_callable=AsyncMock) as mock_enqueue:
+    with (
+        patch("ollama_queue_proxy.injection._shared_state"),
+        patch("ollama_queue_proxy.main._enqueue_request", new_callable=AsyncMock) as mock_enqueue,
+    ):
         from fastapi.responses import JSONResponse
 
         mock_enqueue.return_value = JSONResponse(
@@ -145,6 +141,7 @@ def test_main_port_requires_bearer(tmp_path):
     Injection bypasses this — main port must NOT be softened.
     """
     import yaml
+
     from ollama_queue_proxy.config import load_config
 
     cfg_data = {
@@ -196,8 +193,9 @@ def test_injection_priority_ceiling_enforced():
     If key's max_priority is 'low', a 'high' X-Queue-Priority header from the
     client should be silently capped to 'low' on the injection port.
     """
+    from unittest.mock import MagicMock, patch
+
     import ollama_queue_proxy.injection as inj_mod
-    from unittest.mock import patch, AsyncMock, MagicMock
 
     key_cfg = make_key_cfg(max_priority="low")
     mock_state = MagicMock()
@@ -209,6 +207,7 @@ def test_injection_priority_ceiling_enforced():
     async def fake_enqueue(request, client_id, tier, state):
         captured_tier["tier"] = tier
         from fastapi.responses import JSONResponse
+
         return JSONResponse(status_code=200, content={})
 
     with patch("ollama_queue_proxy.main._enqueue_request", side_effect=fake_enqueue):

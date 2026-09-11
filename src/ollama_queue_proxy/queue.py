@@ -7,8 +7,9 @@ import logging
 import math
 import time
 from collections import deque
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from .config import QueueConfig
 
@@ -25,6 +26,7 @@ class QueueItem:
     future: asyncio.Future
     dispatch_fn: Callable[[], Awaitable[Any]]
     position: int = 0
+    nbytes: int = 0
 
 
 @dataclass
@@ -63,15 +65,25 @@ class PriorityQueueManager:
         self._has_items = asyncio.Event()
         self._worker_tasks: list[asyncio.Task] = []
         self._overflow_code = config.overflow_status_code
+        self._max_queued_bytes = config.max_queued_mb * 1024 * 1024
+        self._queued_bytes = 0
         self._watermark_fired: set[str] = set()
         self._event_callbacks: list[Callable] = []
+        # The event loop keeps only a WEAK reference to a running task, so a task
+        # whose only other reference was the create_task() return value can be
+        # garbage-collected mid-execution — the callback simply never finishes, with
+        # no error anywhere. Holding a strong reference until the task completes is
+        # the documented way to prevent it (RUF006).
+        self._event_tasks: set[asyncio.Task] = set()
 
     def add_event_callback(self, cb: Callable) -> None:
         self._event_callbacks.append(cb)
 
     async def _fire_event(self, event: str, tier: str | None = None, **kwargs) -> None:
         for cb in self._event_callbacks:
-            asyncio.create_task(cb(event, tier=tier, **kwargs))
+            task = asyncio.create_task(cb(event, tier=tier, **kwargs))
+            self._event_tasks.add(task)
+            task.add_done_callback(self._event_tasks.discard)
 
     def start_workers(self) -> None:
         for _ in range(self._max_concurrent):
@@ -99,9 +111,33 @@ class PriorityQueueManager:
             await self._fire_event("queue.full", tier=tier, client_id=item.request_id)
             raise QueueFull(tier, self._overflow_code)
 
+        # Global queued-bytes ceiling. Depth limits bound the NUMBER of waiting
+        # requests; this bounds their total size, which is the figure that actually
+        # determines memory use.
+        #
+        # The empty-queue exemption is load-bearing, not a convenience. Without it a
+        # single body larger than the whole ceiling could never be admitted under any
+        # circumstances — it would be refused against an empty queue forever, which is
+        # a deadlock dressed as backpressure. Admitting it when nothing else is waiting
+        # costs one oversized body's memory (already bounded by max_request_body_mb)
+        # and guarantees forward progress.
+        if self._queued_bytes + item.nbytes > self._max_queued_bytes and not self._all_empty():
+            self._stats[tier].rejected += 1
+            await self._fire_event("queue.over_capacity", tier=tier, client_id=item.request_id)
+            logger.warning(
+                "queue.over_capacity tier=%s request_id=%s queued_bytes=%d incoming=%d cap=%d",
+                tier,
+                item.request_id,
+                self._queued_bytes,
+                item.nbytes,
+                self._max_queued_bytes,
+            )
+            raise QueueOverCapacity(tier, self._overflow_code)
+
         position = q.qsize() + 1
         item.position = position
         await q.put(item)
+        self._queued_bytes += item.nbytes
         self._has_items.set()
 
         # Check high watermark
@@ -127,6 +163,14 @@ class PriorityQueueManager:
                     except asyncio.QueueEmpty:
                         pass
 
+                if item is not None:
+                    # Released at DEQUEUE, not at completion: the ceiling is on bytes
+                    # WAITING in the queue. Bytes in flight are bounded separately by
+                    # proxy.max_concurrent. Placed before the expiry branch below so
+                    # an expired item releases its bytes too — releasing only on the
+                    # success path would leak the ceiling down to zero under load.
+                    self._queued_bytes = max(0, self._queued_bytes - item.nbytes)
+
                 if item is None:
                     # Check if all queues truly empty before clearing the event.
                     # Known benign race: a new item may arrive between get_nowait()
@@ -146,11 +190,11 @@ class PriorityQueueManager:
                     self._stats[tier].expired += 1
                     logger.warning(
                         "queue.expired tier=%s request_id=%s age=%.1fs",
-                        tier, item.request_id, age,
+                        tier,
+                        item.request_id,
+                        age,
                     )
-                    item.future.set_exception(
-                        RequestExpired(tier, item.request_id)
-                    )
+                    item.future.set_exception(RequestExpired(tier, item.request_id))
                 else:
                     try:
                         result = await item.dispatch_fn()
@@ -170,8 +214,14 @@ class PriorityQueueManager:
                 if all(q.empty() for q in self._queues.values()):
                     await self._fire_event("queue.drained", tier=None)
 
+    def _all_empty(self) -> bool:
+        return all(q.empty() for q in self._queues.values())
+
     def queue_depths(self) -> dict[str, int]:
         return {t: self._queues[t].qsize() for t in TIERS}
+
+    def queued_bytes(self) -> int:
+        return self._queued_bytes
 
     def active_count(self) -> int:
         return self._active
@@ -216,6 +266,14 @@ class PriorityQueueManager:
 
 
 class QueueFull(Exception):
+    def __init__(self, tier: str, status_code: int) -> None:
+        self.tier = tier
+        self.status_code = status_code
+
+
+class QueueOverCapacity(Exception):
+    """Total bytes already waiting would exceed queue.max_queued_mb."""
+
     def __init__(self, tier: str, status_code: int) -> None:
         self.tier = tier
         self.status_code = status_code
