@@ -51,6 +51,15 @@ ollama:
   request_timeout: 300       # seconds before upstream timeout
 
 queue:
+  # Total bytes allowed to sit in the queue across all tiers. Depth limits bound the
+  # NUMBER of waiting requests; a queued request holds its whole body until dispatch,
+  # so this is what bounds memory. Over the cap the proxy answers 503 + Retry-After.
+  #
+  # Exemption: when the queues are empty a request is admitted even if its body alone
+  # exceeds the cap, so an oversized body cannot deadlock against a permanently
+  # unsatisfiable ceiling.
+  max_queued_mb: 512
+
   high:
     max_depth: 50
     max_wait: 120            # seconds before stale request is dropped

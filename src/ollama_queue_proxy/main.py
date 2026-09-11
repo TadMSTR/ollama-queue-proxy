@@ -23,7 +23,14 @@ from .config import Config, load_config
 from .middleware import RequestContextMiddleware, get_client_id, parse_priority
 from .openai_compat import is_openai_compat_path, rewrite_path, wrap_response
 from .proxy import dispatch_request, read_body
-from .queue import PriorityQueueManager, QueueFull, QueueItem, QueuePaused, RequestExpired
+from .queue import (
+    PriorityQueueManager,
+    QueueFull,
+    QueueItem,
+    QueueOverCapacity,
+    QueuePaused,
+    RequestExpired,
+)
 from .routes.queue import router as queue_router
 from .routes.status import router as status_router
 from .routing import RoutingTable
@@ -183,6 +190,20 @@ app.include_router(queue_router)
 
 _KEEP_ALIVE_PATHS = frozenset({"/api/generate", "/api/chat", "/api/embed", "/api/embeddings"})
 
+# Metadata reads: no inference cost, so no reason to spend an admission decision on
+# them. These bypass the priority queue and the worker semaphore entirely.
+#
+# They did not before, and the effect was visible: with max_concurrent small (it is 2
+# on the deployment this was found on), a UI polling /api/tags queued behind whatever
+# multi-minute generation happened to be running, and appeared to hang. Policy
+# machinery must not block reads that cost nothing to serve.
+#
+# These still AUTHENTICATE — the bypass is of the queue, not of the auth check, which
+# runs before this point in proxy_handler. What is given up is the per-client
+# concurrency cap on these paths; the ceiling that remains is the shared httpx
+# connection pool, and these are cheap reads against a local daemon.
+_METADATA_FAST_PATH = frozenset({"/api/tags", "/api/version", "/api/ps", "/api/show", "/"})
+
 
 def _inject_keep_alive(body: bytes, cfg_default: str, override: bool, max_body_mb: int) -> bytes:
     """
@@ -232,9 +253,24 @@ async def _enqueue_request(
     if body_err:
         return body_err
 
+    path = path_override if path_override is not None else request.url.path
+
+    # Metadata fast path — straight to dispatch, no queue, no semaphore. Placed here
+    # rather than in proxy_handler so the injection ports get it too: they share this
+    # function precisely so queue behaviour cannot diverge between the two entry points.
+    if path in _METADATA_FAST_PATH:
+        return await dispatch_request(
+            request=request,
+            body=body,
+            client_id=client_id,
+            config=state.config,
+            client=state.http_client,
+            routing_table=state.routing_table,
+            path_override=path_override,
+        )
+
     # keep_alive injection — runs before cache check so cached responses also reflect
     # the injected value (though for embeddings keep_alive has no effect upstream)
-    path = path_override if path_override is not None else request.url.path
     ka_cfg = state.config.keep_alive
     if path in _KEEP_ALIVE_PATHS:
         body = _inject_keep_alive(
@@ -298,6 +334,7 @@ async def _enqueue_request(
         request_id=request_id,
         future=future,
         dispatch_fn=dispatch_fn,
+        nbytes=len(body) if body else 0,
     )
 
     try:
@@ -312,6 +349,18 @@ async def _enqueue_request(
         return JSONResponse(
             status_code=e.status_code,
             content={"error": "queue full", "request_id": request_id},
+            headers={"Retry-After": str(retry_after)},
+        )
+    except QueueOverCapacity as e:
+        retry_after = state.queue_manager.retry_after(e.tier)
+        if client_id:
+            cs = state.client_stats.setdefault(
+                client_id, {"description": None, "processed": 0, "rejected": 0}
+            )
+            cs["rejected"] = cs.get("rejected", 0) + 1
+        return JSONResponse(
+            status_code=e.status_code,
+            content={"error": "queue over capacity (bytes)", "request_id": request_id},
             headers={"Retry-After": str(retry_after)},
         )
     except QueuePaused as e:

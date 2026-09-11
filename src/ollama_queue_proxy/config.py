@@ -49,6 +49,17 @@ class QueueConfig(BaseModel):
     low: TierConfig = TierConfig(max_depth=200, max_wait=600)
     overflow_status_code: Literal[503, 429] = 503
 
+    # A queued request holds its ENTIRE buffered body in memory until a worker picks
+    # it up, so the real memory ceiling is depth x body size, not depth. With the
+    # default depths that is 350 queued requests; at the default 50 MB
+    # max_request_body_mb the existing per-request limit permits ~17 GB of resident
+    # request bodies. Only the per-request size was bounded before this.
+    #
+    # Sized at 512 MB: comfortably above any realistic embedding or chat batch, far
+    # below what would trouble the host. Counts QUEUED bytes only — bodies in flight
+    # are already bounded by proxy.max_concurrent.
+    max_queued_mb: int = 512
+
 
 class WebhookConfig(BaseModel):
     enabled: bool = False

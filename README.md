@@ -11,7 +11,7 @@
 OLLAMA_HOST=http://localhost:11435
 ```
 
-Everything else works as before. Streaming, `/api/tags`, `/api/version` — all pass through transparently.
+Everything else works as before. Streaming, `/api/tags`, `/api/version` — all pass through transparently, and metadata reads skip the queue entirely.
 
 ---
 
@@ -330,6 +330,22 @@ keep_alive:
 
 ---
 
+## Metadata fast path
+
+`/api/tags`, `/api/version`, `/api/ps`, `/api/show` and `/` bypass the priority queue and
+the worker pool. They are authenticated like everything else, then dispatched straight
+upstream.
+
+This matters more than it sounds. Before 0.4.0 every path entered the queue through the
+catch-all handler, so with a small `max_concurrent` a UI polling `/api/tags` would queue
+behind a multi-minute generation and appear to hang. Admission control should not be
+spent on reads that carry no inference cost.
+
+The trade-off: these paths are not subject to per-client concurrency caps. They are cheap
+reads against a local daemon, bounded by the shared HTTP connection pool.
+
+---
+
 ## Priority queuing
 
 Three tiers: `high`, `normal` (default), `low`. Set the tier per-request:
@@ -354,6 +370,49 @@ client = httpx.Client(
 ```
 
 The proxy caps the priority to the key's `max_priority` — a batch key configured with `max_priority: low` can't elevate itself to `high` regardless of what header it sends.
+
+---
+
+## What happens when a request waits too long
+
+Each tier has a `max_wait`. **On reaching it a queued request fails — it is not promoted
+to a higher tier.** The client receives:
+
+```
+HTTP 503
+{"error": "request expired in queue", "request_id": "..."}
+```
+
+with no `Retry-After`. Expiry is evaluated when a worker picks the item up, so a request
+is not cancelled while waiting — it is discarded at the moment it would otherwise have
+been dispatched.
+
+This is worth being deliberate about, because it is the behaviour that bites the exact
+workload this proxy exists for: under sustained high-tier load, a `low`-tier background
+indexer does not merely wait, it errors. For a background job that is often the right
+answer — failing fast and retrying later beats holding a connection for ten minutes — but
+it must be a choice, not a surprise. Set `queue.low.max_wait` to a value your batch client
+is happy to fail at, and have it retry.
+
+Priority aging (promoting a starved request rather than expiring it) is deliberately not
+implemented; it is tracked as an enhancement.
+
+---
+
+## Memory ceiling on the queue
+
+A queued request holds its entire buffered body until a worker takes it, so the real
+memory ceiling is depth x body size, not depth. `queue.max_queued_mb` (default 512) caps
+the **total bytes waiting across all tiers**; over it, the proxy answers `503` with a
+`Retry-After`.
+
+One deliberate exemption: when the queues are empty, a request is admitted even if its
+body alone exceeds the cap. Otherwise a body larger than the ceiling could never be served
+under any circumstances — refused against an empty queue forever, which is a deadlock
+rather than backpressure.
+
+Bytes are released when an item is dequeued. In-flight bodies are bounded separately by
+`proxy.max_concurrent`.
 
 ---
 

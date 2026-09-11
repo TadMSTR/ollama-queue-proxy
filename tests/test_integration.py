@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import json
 import os
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi.responses import JSONResponse
 
 from ollama_queue_proxy.cache import (
     EmbeddingCache,
@@ -339,3 +340,174 @@ def test_pm_label_backslash_before_quote():
     # Backslash must be escaped before quote, so \" (escaped quote) does not
     # become \\" (literal backslash + broken quote).
     assert _pm_label('\\"') == '\\\\\\"'
+
+
+# ---------------------------------------------------------------------------
+# Metadata fast path (0.4.0)
+#
+# /api/tags and friends carry no inference cost, so spending an admission
+# decision on them buys nothing and costs a wait. They used to enter the
+# priority queue through the catch-all like everything else, so with
+# max_concurrent small (2 on the deployment where this was found) a UI polling
+# /api/tags queued behind a multi-minute generation and appeared to hang.
+# ---------------------------------------------------------------------------
+
+
+def _fake_request(path: str, method: str = "GET"):
+    from fastapi import Request
+
+    scope = {
+        "type": "http",
+        "method": method,
+        "path": path,
+        "query_string": b"",
+        "headers": [],
+    }
+    request = Request(scope)
+    request.state.request_id = "fp-test"
+    return request
+
+
+def _state_with_spy_queue(cfg):
+    """AppState whose queue manager records any enqueue attempt and nothing else."""
+    from ollama_queue_proxy.main import AppState
+
+    state = MagicMock(spec=AppState)
+    state.config = cfg
+    state.embedding_cache = None
+    state.concurrency_manager = None
+    state.http_client = AsyncMock()
+    state.routing_table = MagicMock()
+    state.client_stats = {}
+    state.queue_manager = MagicMock()
+    state.queue_manager.enqueue = AsyncMock(side_effect=AssertionError("must not enqueue"))
+    return state
+
+
+@pytest.mark.parametrize("path", ["/api/tags", "/api/version", "/api/ps", "/api/show", "/"])
+@pytest.mark.asyncio
+async def test_metadata_paths_bypass_the_queue(path):
+    from ollama_queue_proxy import main
+    from tests.conftest import make_config
+
+    cfg = make_config()
+    state = _state_with_spy_queue(cfg)
+    sentinel = JSONResponse(status_code=200, content={"ok": True})
+
+    with (
+        patch("ollama_queue_proxy.main.read_body", new=AsyncMock(return_value=(b"", None))),
+        patch(
+            "ollama_queue_proxy.main.dispatch_request",
+            new=AsyncMock(return_value=sentinel),
+        ) as mock_dispatch,
+    ):
+        result = await main._enqueue_request(
+            request=_fake_request(path),
+            client_id="someone",
+            tier="normal",
+            state=state,
+        )
+
+    assert result is sentinel
+    mock_dispatch.assert_awaited_once()
+    state.queue_manager.enqueue.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_inference_paths_still_enqueue():
+    """CONTROL. Without it, a fast path that swallowed EVERY request would satisfy
+    every assertion above — the queue would never be touched for any path, and the
+    tests would read as a clean pass while the queue had been bypassed entirely."""
+    from ollama_queue_proxy import main
+    from tests.conftest import make_config
+
+    cfg = make_config()
+    state = _state_with_spy_queue(cfg)
+    enqueued: list = []
+
+    async def record(item):
+        enqueued.append(item)
+        item.future.set_result(JSONResponse(status_code=200, content={"ok": True}))
+        return 1
+
+    state.queue_manager.enqueue = AsyncMock(side_effect=record)
+
+    with (
+        patch(
+            "ollama_queue_proxy.main.read_body",
+            new=AsyncMock(return_value=(b'{"model":"llama3"}', None)),
+        ),
+        patch("ollama_queue_proxy.main.dispatch_request", new=AsyncMock()),
+    ):
+        await main._enqueue_request(
+            request=_fake_request("/api/chat", method="POST"),
+            client_id="someone",
+            tier="normal",
+            state=state,
+        )
+
+    assert len(enqueued) == 1, "/api/chat must still go through the queue"
+
+    # The cap can only work if items carry their body size at all.
+    #
+    # Deliberately asserted as "at least the original", not an exact figure: /api/chat
+    # is a keep_alive path, so the body is REWRITTEN with an injected keep_alive before
+    # it is enqueued and arrives larger than it started (18 bytes in, 36 out). Counting
+    # the post-injection size is the correct behaviour — that is the buffer actually
+    # held in memory while the item waits — and pinning the exact number here would
+    # just couple this test to the keep_alive default.
+    original_len = len(b'{"model":"llama3"}')
+    assert enqueued[0].nbytes >= original_len, (
+        "queued items must carry the size of the body they retain"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Low-tier expiry semantics (confirmed, then documented — 0.4.0)
+#
+# At max_wait a queued item is NOT promoted, it FAILS. Under sustained
+# high-tier load the low tier therefore does not merely wait, it errors. The
+# plan for this change asked what status code the client actually receives
+# before writing it into the README, rather than reading the raise site and
+# assuming the handler passes it through — so this asserts the wire response.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_expired_request_returns_503_to_the_client():
+    from ollama_queue_proxy import main
+    from ollama_queue_proxy.queue import QueueItem, RequestExpired
+    from tests.conftest import make_config
+
+    cfg = make_config()
+    state = _state_with_spy_queue(cfg)
+
+    async def expire(item: QueueItem):
+        item.future.set_exception(RequestExpired(item.tier, item.request_id))
+        return 1
+
+    state.queue_manager.enqueue = AsyncMock(side_effect=expire)
+    state.queue_manager.retry_after = MagicMock(return_value=5)
+
+    with (
+        patch(
+            "ollama_queue_proxy.main.read_body",
+            new=AsyncMock(return_value=(b'{"model":"llama3"}', None)),
+        ),
+        patch("ollama_queue_proxy.main.dispatch_request", new=AsyncMock()),
+    ):
+        response = await main._enqueue_request(
+            request=_fake_request("/api/chat", method="POST"),
+            client_id="batch-worker",
+            tier="low",
+            state=state,
+        )
+
+    assert response.status_code == 503
+    assert b"request expired in queue" in bytes(response.body)
+
+    # Not a promotion, and not a retry hint either — the client is told the request
+    # failed, with nothing indicating it will fare better later. Priority aging is
+    # deliberately not implemented (vikunja#787); this asserts the behaviour that
+    # exists so the README can describe it accurately.
+    assert "Retry-After" not in response.headers
