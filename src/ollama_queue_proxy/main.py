@@ -20,7 +20,6 @@ from .auth import AuthManager
 from .cache import EmbeddingCache
 from .concurrency import ClientConcurrencyManager
 from .config import Config, load_config
-from .hosts import HostManager
 from .middleware import RequestContextMiddleware, get_client_id, parse_priority
 from .openai_compat import is_openai_compat_path, rewrite_path, wrap_response
 from .proxy import dispatch_request, read_body
@@ -37,11 +36,10 @@ logger = logging.getLogger(__name__)
 class AppState:
     config: Config
     auth_manager: AuthManager
-    host_manager: HostManager
     queue_manager: PriorityQueueManager
     webhook_manager: WebhookManager
     http_client: httpx.AsyncClient
-    routing_table: RoutingTable | None = None
+    routing_table: RoutingTable
     embedding_cache: EmbeddingCache | None = None
     concurrency_manager: ClientConcurrencyManager | None = None
     start_time: datetime = field(default_factory=lambda: datetime.now(UTC))
@@ -88,7 +86,6 @@ async def lifespan(app: FastAPI):
     _warn_open_binding(config)
 
     http_client = httpx.AsyncClient()
-    host_manager = HostManager(config.ollama)
     auth_manager = AuthManager(config.auth)
     queue_manager = PriorityQueueManager(config.queue, config.proxy.max_concurrent)
     webhook_manager = WebhookManager(config.webhooks, http_client)
@@ -108,11 +105,12 @@ async def lifespan(app: FastAPI):
             "rejected": 0,
         }
 
-    # Build routing table if model-aware strategy is configured
-    routing_table: RoutingTable | None = None
-    if config.routing.strategy != "round_robin":
-        routing_table = RoutingTable(config.ollama, config.routing, http_client)
-        await routing_table.startup_probe()
+    # Built unconditionally. It is the only per-host state there is; `routing.strategy`
+    # selects how pick() chooses, not whether host state exists. Building it only for
+    # model_aware was what left the DEFAULT (round_robin) deployment with no background
+    # host polling at all — see the module docstring in routing.py.
+    routing_table = RoutingTable(config.ollama, config.routing, http_client)
+    await routing_table.startup_probe()
 
     # Build embedding cache if enabled
     embedding_cache: EmbeddingCache | None = None
@@ -127,7 +125,6 @@ async def lifespan(app: FastAPI):
     state = AppState(
         config=config,
         auth_manager=auth_manager,
-        host_manager=host_manager,
         queue_manager=queue_manager,
         webhook_manager=webhook_manager,
         http_client=http_client,
@@ -139,11 +136,8 @@ async def lifespan(app: FastAPI):
     app.state.oqp = state
     set_shared_state(state)  # make available to injection apps
 
-    await host_manager.startup_check(http_client)
     queue_manager.start_workers()
-    await host_manager.start_background_checks(http_client)
-    if routing_table:
-        routing_table.start_background_pollers()
+    routing_table.start_background_pollers()
 
     logger.info(
         "ollama-queue-proxy started host=%s port=%d auth=%s injection_listeners=%d",
@@ -167,9 +161,7 @@ async def lifespan(app: FastAPI):
         logger.warning("shutdown: drain timeout after %ds", drain_timeout)
 
     await queue_manager.stop_workers()
-    await host_manager.stop()
-    if routing_table:
-        await routing_table.stop()
+    await routing_table.stop()
     if embedding_cache:
         await embedding_cache.close()
     await http_client.aclose()
@@ -292,7 +284,6 @@ async def _enqueue_request(
                 body=body,
                 client_id=client_id,
                 config=state.config,
-                host_manager=state.host_manager,
                 client=state.http_client,
                 routing_table=state.routing_table,
                 path_override=path_override,

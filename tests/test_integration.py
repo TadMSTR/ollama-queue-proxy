@@ -272,9 +272,9 @@ def test_model_aware_routing_picks_model_host():
     routing_cfg = RoutingConfig(strategy="model_aware", fallback="any_healthy")  # type: ignore[arg-type]
     table = RoutingTable(ollama_cfg, routing_cfg, MagicMock())
 
-    table._states["a"].loaded_models = set()
+    table._states["a"].installed_models = set()
     table._states["a"].reachable = True
-    table._states["b"].loaded_models = {"llama3"}
+    table._states["b"].installed_models = {"llama3"}
     table._states["b"].reachable = True
 
     result = table.pick("llama3")

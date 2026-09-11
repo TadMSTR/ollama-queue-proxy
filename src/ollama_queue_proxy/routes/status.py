@@ -54,13 +54,15 @@ async def queue_status(request: Request):
         }
 
     hosts_data = []
-    for host in state.host_manager.hosts:
+    for host in state.routing_table.hosts:
         hosts_data.append(
             {
                 "name": host.name,
                 "url": host.url,
-                "healthy": host.healthy,
-                "models": host.models,
+                # JSON key stays `healthy` and `models`: this is a consumed HTTP
+                # surface, and the internal rename is not a reason to break it.
+                "healthy": host.reachable,
+                "models": sorted(host.installed_models),
                 "last_checked": host.last_checked.isoformat() if host.last_checked else None,
                 "requests_handled": host.requests_handled,
                 "failures": host.failures,
@@ -151,15 +153,15 @@ async def metrics(request: Request):
         "# HELP oqp_host_healthy Whether the host is currently healthy (1=healthy, 0=unhealthy)",
         "# TYPE oqp_host_healthy gauge",
     ]
-    for host in state.host_manager.hosts:
+    for host in state.routing_table.hosts:
         name = _pm_label(host.name)
-        lines.append(f'oqp_host_healthy{{name="{name}"}} {1 if host.healthy else 0}')
+        lines.append(f'oqp_host_healthy{{name="{name}"}} {1 if host.reachable else 0}')
 
     lines += [
         "# HELP oqp_host_requests_total Total requests handled by host",
         "# TYPE oqp_host_requests_total counter",
     ]
-    for host in state.host_manager.hosts:
+    for host in state.routing_table.hosts:
         name = _pm_label(host.name)
         lines.append(f'oqp_host_requests_total{{name="{name}"}} {host.requests_handled}')
 
@@ -167,7 +169,7 @@ async def metrics(request: Request):
         "# HELP oqp_host_failures_total Total upstream failures for host",
         "# TYPE oqp_host_failures_total counter",
     ]
-    for host in state.host_manager.hosts:
+    for host in state.routing_table.hosts:
         name = _pm_label(host.name)
         lines.append(f'oqp_host_failures_total{{name="{name}"}} {host.failures}')
 
@@ -231,22 +233,25 @@ async def metrics(request: Request):
         for kind, count in cache_errors.items():
             lines.append(f'oqp_embedding_cache_errors_total{{kind="{_pm_label(kind)}"}} {count}')
 
-    # Routing table metrics (model_aware strategy only)
-    if state.routing_table is not None:
-        rt = state.routing_table
-        lines += [
-            "# HELP oqp_host_models_loaded Number of models currently loaded on each host",
-            "# TYPE oqp_host_models_loaded gauge",
-        ]
-        for host_name, count in rt.host_model_counts().items():
-            lines.append(f'oqp_host_models_loaded{{host="{_pm_label(host_name)}"}} {count}')
+    # Routing table metrics. Unconditional now — the table always exists.
+    rt = state.routing_table
+    # RENAMED from oqp_host_models_loaded in 0.4.0. The old name said "loaded", meaning
+    # resident in VRAM, and reported models merely INSTALLED on disk. No alias is kept:
+    # nothing on the deployment scrapes /metrics (no Prometheus config exists; see
+    # vikunja#26), so the rename costs no dashboard. Noted in CHANGELOG as breaking.
+    lines += [
+        "# HELP oqp_host_models_installed Number of models installed on each host (/api/tags)",
+        "# TYPE oqp_host_models_installed gauge",
+    ]
+    for host_name, count in rt.host_model_counts().items():
+        lines.append(f'oqp_host_models_installed{{host="{_pm_label(host_name)}"}} {count}')
 
-        lines += [
-            "# HELP oqp_routing_decisions_total Routing decisions by reason",
-            "# TYPE oqp_routing_decisions_total counter",
-        ]
-        for reason, count in rt.routing_decisions.items():
-            lines.append(f'oqp_routing_decisions_total{{reason="{_pm_label(reason)}"}} {count}')
+    lines += [
+        "# HELP oqp_routing_decisions_total Routing decisions by reason",
+        "# TYPE oqp_routing_decisions_total counter",
+    ]
+    for reason, count in rt.routing_decisions.items():
+        lines.append(f'oqp_routing_decisions_total{{reason="{_pm_label(reason)}"}} {count}')
 
     lines += [
         "# HELP oqp_uptime_seconds Proxy uptime in seconds since last start",
