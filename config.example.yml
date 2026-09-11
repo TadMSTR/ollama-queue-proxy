@@ -42,7 +42,12 @@ ollama:
     #   name: "secondary"
     #   weight: 1
     #   model_sync_interval: 30
-  health_check_interval: 30  # seconds between recovery checks on unhealthy hosts
+  # DEPRECATED in 0.4.0 and no longer read. It drove a second host-health loop that
+  # has been removed; ollama.hosts[].model_sync_interval is now the only poll interval,
+  # and it polls every host rather than only unhealthy ones. Setting this logs a
+  # warning at startup. Left here, commented, so an operator upgrading finds the note
+  # rather than silently losing the behaviour they configured.
+  # health_check_interval: 30
   request_timeout: 300       # seconds before upstream timeout
 
 queue:
@@ -95,6 +100,10 @@ auth:
   #   max_priority: low
   #   management: false
   #   max_concurrent: 2            # cap batch client at 2 concurrent
+  # This throttles FAILED AUTHENTICATION ATTEMPTS PER IP. It is not a request rate
+  # limit: an authenticated client can send as many requests as it likes, bounded by
+  # the queue and its max_concurrent, not by this. Named `rate_limit` for historical
+  # reasons; read it as "auth brute-force throttle".
   rate_limit:
     max_failures: 10         # consecutive auth failures per IP before 429
     window_seconds: 60       # rolling window for failure counting
@@ -130,8 +139,16 @@ logging:
 # ---------------------------------------------------------------------------
 # NEW v0.2.0 — Model-aware routing
 # ---------------------------------------------------------------------------
-# Route requests to the Ollama host that already has the target model loaded.
-# Polling uses ollama.hosts[].model_sync_interval (per host, default 30s).
+# Route requests to an Ollama host that already has the target model INSTALLED.
+#
+# Installed, not loaded. The router reads /api/tags (models on disk), not /api/ps
+# (models resident in VRAM). This avoids picking a host that would have to pull the
+# model; it does NOT avoid cold-start latency. Where every host has the same models
+# pulled, model_aware has nothing to discriminate on and behaves as weighted
+# round-robin.
+#
+# Polling uses ollama.hosts[].model_sync_interval (per host, default 30s), and polls
+# every host on every interval regardless of current reachability.
 # Weighted round-robin is deterministic: weight=2 means 2 requests per 1 for weight=1.
 #
 # Startup: probes all hosts via /api/tags once before accepting requests.
@@ -141,7 +158,7 @@ logging:
 #
 # routing:
 #   strategy: model_aware            # model_aware | round_robin (default: round_robin)
-#   fallback: any_healthy            # when no host has the model loaded: pick any healthy host
+#   fallback: any_healthy            # when no host has the model installed: pick any reachable host
 #   model_poll_timeout: 3            # seconds for each /api/tags poll
 
 # ---------------------------------------------------------------------------
