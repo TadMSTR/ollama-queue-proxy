@@ -219,6 +219,48 @@ Authorization: Bearer sk-my-interactive-key
 
 ---
 
+## Where API keys come from
+
+A key may be given three ways, and **exactly one** per entry:
+
+```yaml
+auth:
+  enabled: true
+  keys:
+    - key: "literal-key-in-this-file"       # simplest; fine for a private config
+      client_id: open-webui
+      max_priority: high
+
+    - key_env: OQP_KEY_SEARXNG              # from the environment
+      client_id: searxng-mcp
+      max_priority: normal
+
+    - key_file: /run/secrets/oqp-memsearch  # from a file — Docker/systemd secret style
+      client_id: memsearch-watch
+      max_priority: low
+```
+
+`key_file` strips trailing whitespace, because `echo secret > file` and most secret
+managers leave a trailing newline, and a key that differs only by `\n` fails
+authentication with nothing in the logs explaining why.
+
+**Why this exists.** Every other setting can be supplied through the environment, but
+`OQP_AUTH__KEYS__0__KEY` never worked: the override mechanism skips any path containing a
+numeric component, and the list index trips it. So until 0.4.0 a literal in `config.yml`
+was the only option — not as a design decision, but as a side effect. That is how API
+keys end up committed to configuration repositories.
+
+**Failure modes are loud and quiet in the right places.** A missing env var, an unreadable
+file, zero sources, two sources, or a value that resolves to empty all fail at startup
+with a message naming the `client_id` — and never the value. Resolved keys are excluded
+from the model's `repr`, so a traceback or a debug dump of the config does not carry them.
+
+> Migrating an existing deployment is a separate step from this mechanism. Keys already
+> committed to a repository's history stay compromised until they are rotated; moving them
+> to `key_env:` does not un-publish them.
+
+---
+
 ## Client injection
 
 Some clients can't send a `Bearer` token — they're hardcoded to talk to Ollama directly with no auth header. Client injection solves this by binding extra ports that automatically inject a fixed identity, so those clients get full auth and priority enforcement without any client-side changes.
@@ -582,9 +624,9 @@ OQP_EMBEDDING_CACHE__ENABLED=true
 ```
 
 > **API keys cannot be set this way.** `_apply_env_overrides` skips any path with a
-> numeric component, so `OQP_AUTH__KEYS__0__KEY` is silently ignored and keys must be
-> literals in `config.yml`. See the secret-reference section below for `key_env:` and
-> `key_file:`.
+> numeric component, so `OQP_AUTH__KEYS__0__KEY` is silently ignored — the list index is
+> what trips it. Use `key_env:` or `key_file:` instead; see
+> [Where API keys come from](#where-api-keys-come-from).
 
 See [`config.example.yml`](config.example.yml) for the full config with inline documentation.
 

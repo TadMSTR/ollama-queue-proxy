@@ -109,6 +109,19 @@ auth:
   #   max_priority: low
   #   management: false
   #   max_concurrent: 2            # cap batch client at 2 concurrent
+  # Each entry needs EXACTLY ONE of key / key_env / key_file:
+  #
+  #   key:      "literal"                    literal in this file
+  #   key_env:  OQP_KEY_SEARXNG              read from the environment
+  #   key_file: /run/secrets/oqp-searxng     read from a file (trailing \n stripped)
+  #
+  # key_env / key_file exist because OQP_AUTH__KEYS__0__KEY does NOT work: the env
+  # override mechanism skips any path with a numeric component, and the list index
+  # trips it. A literal here was the only option until 0.4.0 by accident, not design.
+  #
+  # Startup fails with a message naming the client_id (never the value) if a source is
+  # missing, unreadable, doubled, absent, or resolves to empty.
+
   # This throttles FAILED AUTHENTICATION ATTEMPTS PER IP. It is not a request rate
   # limit: an authenticated client can send as many requests as it likes, bounded by
   # the queue and its max_concurrent, not by this. Named `rate_limit` for historical

@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class HostConfig(BaseModel):
@@ -75,7 +76,24 @@ class WebhookConfig(BaseModel):
 
 
 class ApiKeyConfig(BaseModel):
-    key: str
+    """One consumer's credential and the policy attached to it.
+
+    The key may be given three ways — as a literal, from the environment, or from a
+    file — and EXACTLY ONE must be used. Before 0.4.0 a literal in config.yml was the
+    only option, and not by design: `_apply_env_overrides` skips any path containing a
+    numeric component, so `OQP_AUTH__KEYS__0__KEY` is silently ignored. The index is
+    what trips it. Every other setting can come from the environment (the deployment
+    this was found on passes OQP_EMBEDDING_CACHE__BACKEND that way), which is why the
+    gap was not obvious: the mechanism works everywhere except the one field that most
+    needs it. That is the direct cause of plaintext keys sitting in config repositories.
+    """
+
+    # repr=False so a credential cannot reach a log through an incidental repr() of the
+    # config object — a traceback, a debug print, a pydantic validation error quoting
+    # the model. The resolved value still lives here for auth.py to read.
+    key: str | None = Field(default=None, repr=False)
+    key_env: str | None = None
+    key_file: str | None = None
     client_id: str
     description: str | None = None
     max_priority: Literal["high", "normal", "low"] = "normal"
@@ -88,6 +106,62 @@ class ApiKeyConfig(BaseModel):
         if v < 0:
             raise ValueError(f"auth.keys[].max_concurrent must be a non-negative integer, got {v}")
         return v
+
+    @model_validator(mode="after")
+    def resolve_key_source(self) -> ApiKeyConfig:
+        """Resolve exactly one of key / key_env / key_file into `key`.
+
+        Every failure message names the client_id and never the value. A message that
+        echoes the key to explain that the key is wrong puts it in the log the operator
+        is about to paste somewhere.
+        """
+        sources = [
+            ("key", self.key),
+            ("key_env", self.key_env),
+            ("key_file", self.key_file),
+        ]
+        given = [name for name, value in sources if value is not None]
+
+        if len(given) == 0:
+            raise ValueError(
+                f"auth.keys[] entry for client_id={self.client_id!r} has no key: "
+                "set exactly one of key, key_env or key_file"
+            )
+        if len(given) > 1:
+            raise ValueError(
+                f"auth.keys[] entry for client_id={self.client_id!r} sets "
+                f"{', '.join(given)} — set exactly one of key, key_env or key_file"
+            )
+
+        if self.key_env is not None:
+            resolved = os.environ.get(self.key_env)
+            if resolved is None:
+                raise ValueError(
+                    f"auth.keys[] entry for client_id={self.client_id!r} names "
+                    f"key_env={self.key_env!r}, which is not set in the environment"
+                )
+            self.key = resolved
+        elif self.key_file is not None:
+            try:
+                resolved = Path(self.key_file).read_text()
+            except OSError as e:
+                raise ValueError(
+                    f"auth.keys[] entry for client_id={self.client_id!r} names "
+                    f"key_file={self.key_file!r}, which cannot be read: {e.strerror}"
+                ) from e
+            # Strip trailing whitespace. `echo secret > file` and every secret manager
+            # that writes a file leave a trailing newline, and a key that differs from
+            # the expected one by \n fails authentication with no indication why.
+            self.key = resolved.strip()
+
+        if not self.key or not self.key.strip():
+            source = given[0]
+            raise ValueError(
+                f"auth.keys[] entry for client_id={self.client_id!r} resolved to an "
+                f"empty key from {source}. An empty credential would authenticate no "
+                "one and is never intentional"
+            )
+        return self
 
 
 class RateLimitConfig(BaseModel):
