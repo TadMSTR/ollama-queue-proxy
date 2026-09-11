@@ -2,6 +2,9 @@ name: CI
 
 on: [push, pull_request]
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -20,9 +23,24 @@ jobs:
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
         with:
           python-version: "3.12"
+
+      # ruff's version comes from the `dev` extra, where it is pinned exactly
+      # (ruff==0.16.0). Pinning it a second time here would be a second source of
+      # truth for one fact, and the two would eventually disagree.
       - run: pip install -e ".[dev]"
-      - run: ruff check src/
-      - run: pytest tests/ -v
+
+      # src/ AND tests/. This linted `src/` only, so every rule was unenforced across
+      # half the repository — the first run over tests/ found 31 unused imports and
+      # three assertions that could not fail.
+      - run: ruff check src/ tests/
+      - run: ruff format --check src/ tests/
+
+      # Coverage is MEASURED here, not merely configured. `pytest tests/ -v` ran with
+      # no coverage at all, which left any fail_under in pyproject.toml inert: the
+      # floor existed, nothing ever compared anything to it. --cov-fail-under is not
+      # passed as a literal; it comes from [tool.coverage.report] so the number lives
+      # in exactly one place.
+      - run: pytest -v --cov --cov-report=term
 
   docker:
     runs-on: ubuntu-latest
