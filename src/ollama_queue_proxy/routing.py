@@ -210,7 +210,25 @@ class RoutingTable:
     # -- mutation ------------------------------------------------------------
 
     def mark_unhealthy(self, state: HostRoutingState, error: str) -> None:
-        """Record an upstream failure observed by the request path."""
+        """Record an upstream failure observed by the request path.
+
+        SECURITY[accepted]: writes `reachable` and `failures` without taking
+        `self._lock`, which `_poll_host` does take. Deliberate, not an oversight.
+        This function contains no `await`, so under asyncio's cooperative scheduling
+        its two writes cannot be interleaved with a concurrently running poll — the
+        fields cannot be torn. What remains is that the two writers do not order
+        themselves, so a request-path failure and a poll completion for the same host
+        can land in either order and the later write wins regardless of which
+        observation is more current. That is the same staleness `_candidates()`
+        already absorbs by design: `reachable` is documented as a cached observation,
+        and the reachable-or-everything fallback exists precisely so a stale value
+        cannot black-hole the proxy. Worst case is one extra failover attempt, or one
+        request sent to a host that just recovered. Taking the lock would require
+        making this coroutine `async` and awaiting it from the request path's
+        exception handler, adding a suspension point inside failover handling to buy
+        ordering the design does not rely on. Audit: 2026-09-11 /
+        ollama-queue-proxy-fleet-standard-2026-09 (F-02, Info).
+        """
         state.reachable = False
         state.failures += 1
         logger.warning("host.failure name=%s error=%s", state.name, error)
