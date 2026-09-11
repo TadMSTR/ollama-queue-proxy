@@ -1,16 +1,32 @@
-# Release — build, verify, then publish to GHCR.
+# Release — verify every published architecture, then publish.
 #
-# WHAT CHANGED IN 0.4.0 AND WHY THE ORDER MATTERS
+# WHAT CHANGED, AND WHY IT CHANGED TWICE
 #
-# This workflow previously built and pushed in a single step with no provenance, no
+# Before 0.4.0 this workflow built and pushed in a single step with no provenance, no
 # SBOM, no vulnerability scan and a single architecture. Anything that went wrong went
 # wrong in public: the tag was already live before anyone could look at it.
 #
-# So the image is now built ONCE for amd64, loaded locally, scanned and smoke-tested,
-# and only then rebuilt multi-arch and pushed. The rebuild is nearly free — it is the
-# same buildx cache — and it buys the property that matters: nothing reaches GHCR that
-# has not already been run and scanned. A gate that fires after publication is a
-# notification, not a gate.
+# The first fix built amd64 locally, scanned and smoke-tested it, then pushed a
+# multi-arch image. The 2026-09-11 security audit (Finding 1, Medium) caught what that
+# left open: the publish step is a SEPARATE build, so the arm64 half was constructed
+# for the first time at push time and never met Trivy or the smoke test — and
+# `attest-build-provenance` then signed a manifest containing layers nothing had
+# verified. "Scanned before publish" was true of one architecture and asserted of two.
+#
+# So verification is now a matrix over every platform this image publishes, and
+# `publish` has `needs: verify`. An arm64-only CVE, or a startup bug that only appears
+# on arm64, fails the release instead of shipping with an attestation implying it was
+# checked. The matrix and the `platforms:` list below must stay in step; that is the
+# one invariant here.
+#
+# RESIDUAL, STATED RATHER THAN IMPLIED: `publish` still rebuilds rather than pushing
+# the exact image objects that were verified. Both halves come from the shared
+# `type=gha` cache populated by the verify jobs, so in practice the layers are
+# identical — but "in practice" is not "provably". Closing that fully means
+# push-by-digest plus `docker buildx imagetools create` to assemble the manifest from
+# the verified digests. That is a larger change to a path which cannot be exercised
+# until a tag is cut, so it is deliberately not attempted here. If this workflow is
+# revisited, that is the next step.
 
 name: Release
 
@@ -23,49 +39,35 @@ permissions:
   contents: read
 
 jobs:
-  publish:
+  # ---- verify: one job per published architecture ---------------------------------
+  verify:
+    name: Verify (${{ matrix.platform }})
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-      id-token: write # OIDC, required to sign the provenance attestation
-      attestations: write # write the attestation back to the repository
+    strategy:
+      fail-fast: true # a failure on either architecture must stop the release
+      matrix:
+        # MUST match the `platforms:` list in the publish job below.
+        platform: [linux/amd64, linux/arm64]
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
+      # Provides binfmt handlers, which is what lets a non-native image both build
+      # and RUN on this runner. The smoke test below depends on the second part.
       - name: Set up QEMU
         uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
-      - name: Log in to GHCR
-        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@369eb591f429131d6889c46b94e711f089e6ca96 # v5.6.1
-        with:
-          images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-
-      # ---- verify before publishing -------------------------------------------------
-
-      # amd64 only, because a multi-platform build cannot be loaded into the local
-      # daemon — there is no single image to load. This is the copy that gets scanned
-      # and run.
-      - name: Build for verification (amd64, local)
+      # Single platform per job, because `load: true` requires exactly one image —
+      # a multi-platform manifest cannot be loaded into the local daemon, which is
+      # why the original verify step was amd64-only and how the gap appeared.
+      - name: Build for verification
         uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75 # v6.9.0
         with:
           context: .
-          platforms: linux/amd64
+          platforms: ${{ matrix.platform }}
           push: false
           load: true
           tags: ollama-queue-proxy:verify
@@ -127,27 +129,66 @@ jobs:
             -e OQP_CONFIG=/app/config.yml \
             ollama-queue-proxy:verify
 
-          for _ in $(seq 1 30); do
+          # 120s, not 60s. The non-native image runs under QEMU emulation, where
+          # interpreter startup is several times slower than native. A timeout tuned
+          # to the native case would make the arm64 job flaky, and a flaky release
+          # gate gets bypassed just as readily as a broken one.
+          for _ in $(seq 1 60); do
             if curl -sf http://127.0.0.1:11435/health >/dev/null 2>&1; then
-              echo "health OK"
+              echo "health OK on ${{ matrix.platform }}"
               docker rm -f oqp-smoke
               exit 0
             fi
             sleep 2
           done
 
-          echo "::error::container never served /health"
+          echo "::error::container never served /health on ${{ matrix.platform }}"
           docker logs oqp-smoke || true
           docker rm -f oqp-smoke || true
           exit 1
 
-      # ---- publish ------------------------------------------------------------------
+  # ---- publish: only reachable if every architecture verified ---------------------
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write # OIDC, required to sign the provenance attestation
+      attestations: write # write the attestation back to the repository
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@369eb591f429131d6889c46b94e711f089e6ca96 # v5.6.1
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
 
       - name: Build and push (multi-arch)
         id: push
         uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75 # v6.9.0
         with:
           context: .
+          # MUST match the verify matrix above. A platform added here and not there
+          # ships unverified, which is exactly the audit finding this structure fixes.
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
@@ -157,6 +198,7 @@ jobs:
           # those questions without trusting this file.
           provenance: true
           sbom: true
+          # Reuses the layers the verify jobs built and scanned.
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
