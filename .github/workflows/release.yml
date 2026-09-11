@@ -99,6 +99,10 @@ jobs:
       # is all the startup probe reads. Verified end to end before being committed.
       - name: Smoke test — the container starts and serves /health
         run: |
+          # -e is on by default for Actions bash, but not -u or pipefail, and this
+          # block is long enough that an unset variable silently expanding to empty
+          # would be read as a passing smoke test (SH-01).
+          set -euo pipefail
           mkdir -p /tmp/fake-ollama/api
           echo '{"models":[{"name":"llama3:8b"}]}' > /tmp/fake-ollama/api/tags
           (cd /tmp/fake-ollama && python3 -m http.server 11434 --bind 127.0.0.1 &)

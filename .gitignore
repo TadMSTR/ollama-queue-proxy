@@ -7,6 +7,11 @@ config.yml
 *.key
 *.pem
 
+# Core dumps. A crash dump of this process contains the resolved API keys in
+# memory, so it is a credential file that does not look like one (SC-02).
+core.*
+*.core
+
 # Python
 __pycache__/
 *.py[cod]

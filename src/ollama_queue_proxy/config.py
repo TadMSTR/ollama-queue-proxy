@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+import warnings
 from pathlib import Path
 from typing import Literal
 
@@ -149,6 +150,24 @@ class ApiKeyConfig(BaseModel):
                     f"auth.keys[] entry for client_id={self.client_id!r} names "
                     f"key_file={self.key_file!r}, which cannot be read: {e.strerror}"
                 ) from e
+            # Warn — do not fail — if the file is readable beyond its owner. A
+            # credential in a 0644 file is exposed to every local user, and nothing
+            # else in the system would ever mention it (NE-05). Not fatal, because
+            # the correct mode depends on deployment: a Docker secret is 0444 inside
+            # the container and owned by root, and refusing that would make the
+            # feature unusable exactly where it is most wanted.
+            try:
+                mode = Path(self.key_file).stat().st_mode
+                if mode & 0o077:
+                    warnings.warn(
+                        f"auth.keys[] key_file for client_id={self.client_id!r} is "
+                        f"mode {mode & 0o777:04o} — readable beyond its owner. "
+                        "Prefer 0600.",
+                        stacklevel=2,
+                    )
+            except OSError:
+                pass  # already read successfully; a stat failure here is not fatal
+
             # Strip trailing whitespace. `echo secret > file` and every secret manager
             # that writes a file leave a trailing newline, and a key that differs from
             # the expected one by \n fails authentication with no indication why.

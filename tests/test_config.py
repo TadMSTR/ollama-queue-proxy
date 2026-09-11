@@ -542,3 +542,31 @@ def test_resolved_key_never_reaches_logs_at_debug(monkeypatch, tmp_path):
     finally:
         root.handlers[:] = original_handlers
         root.setLevel(original_level)
+
+
+def test_world_readable_key_file_warns(tmp_path):
+    """NE-05. A credential in a 0644 file is exposed to every local user and nothing
+    else in the system would ever mention it."""
+    import os
+
+    f = tmp_path / "oqp-consumer"
+    f.write_text(SECRET)
+    os.chmod(f, 0o644)
+    with pytest.warns(UserWarning, match="readable beyond its owner"):
+        cfg = ApiKeyConfig(**_key_entry(key_file=str(f)))
+    assert cfg.key == SECRET, "the warning must not stop the key resolving"
+
+
+def test_owner_only_key_file_does_not_warn(tmp_path):
+    """CONTROL: warning on a correctly-permissioned file would fire for every
+    well-configured deployment, which trains people to ignore the warning."""
+    import os
+    import warnings as _w
+
+    f = tmp_path / "oqp-consumer"
+    f.write_text(SECRET)
+    os.chmod(f, 0o600)
+    with _w.catch_warnings():
+        _w.simplefilter("error")  # any warning becomes an exception
+        cfg = ApiKeyConfig(**_key_entry(key_file=str(f)))
+    assert cfg.key == SECRET
