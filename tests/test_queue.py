@@ -56,6 +56,7 @@ async def test_enqueue_position_increments():
     mgr = make_queue_mgr()
     pos1 = await mgr.enqueue(make_item("normal", "req1"))
     pos2 = await mgr.enqueue(make_item("normal", "req2"))
+    assert pos1 == 1
     assert pos2 == 2
 
 

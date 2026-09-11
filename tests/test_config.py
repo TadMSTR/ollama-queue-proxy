@@ -210,7 +210,8 @@ def test_injection_non_loopback_bind_with_allow_public_warns(tmp_path, capsys):
 
 
 def test_injection_non_loopback_bind_with_auth_and_allow_public_still_warns(tmp_path, capsys):
-    # auth.enabled=true does NOT silence the non-loopback warning — injection bypasses main-port auth.
+    # auth.enabled=true does NOT silence the non-loopback warning —
+    # injection bypasses main-port auth.
     data = _config_with_auth_and_injection()
     data["client_injection"]["listeners"][0]["bind"] = "192.168.1.50"
     data["client_injection"]["allow_public_injection"] = True

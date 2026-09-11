@@ -34,16 +34,16 @@ async def _require_management(request: Request) -> JSONResponse | None:
     key_cfg, err = await state.auth_manager.authenticate(request)
     if err:
         return err
-    if state.config.auth.enabled:
-        # key_cfg is set (auth succeeded), now check management flag
-        if key_cfg is None or not key_cfg.management:
-            return JSONResponse(
-                status_code=403,
-                content={
-                    "error": "management permission required",
-                    "request_id": getattr(request.state, "request_id", "unknown"),
-                },
-            )
+    # With auth disabled there is no key to carry a management flag, so the route is
+    # open — see the auth-off caveat in the README.
+    if state.config.auth.enabled and (key_cfg is None or not key_cfg.management):
+        return JSONResponse(
+            status_code=403,
+            content={
+                "error": "management permission required",
+                "request_id": getattr(request.state, "request_id", "unknown"),
+            },
+        )
     return None
 
 

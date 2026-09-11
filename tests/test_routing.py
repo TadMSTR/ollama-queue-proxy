@@ -159,6 +159,11 @@ def test_no_model_field_uses_round_robin():
 
     results = [table.pick(None).name for _ in range(4)]
     assert table.routing_decisions["round_robin"] == 4
+    # The counter alone says only that the branch was taken, not that it rotated.
+    # _pick_round_robin is deterministic, so two equal-weight hosts over four picks
+    # must alternate and land twice each.
+    assert sorted(results) == ["a", "a", "b", "b"]
+    assert results[0] != results[1]
 
 
 # ---------------------------------------------------------------------------

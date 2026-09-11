@@ -157,12 +157,21 @@ def test_keep_alive_injection_does_not_affect_embed_cache_key():
     key_without = _embed_key("oqp:embed:", "nomic", data_without)
     key_with = _embed_key("oqp:embed:", "nomic", data_with)
 
-    # Keys differ because keep_alive is part of the dict passed to hashing.
-    # This is acceptable — keep_alive injection happens before cache lookup in main.py,
-    # so both the cache-miss request and the cache-hit request will have keep_alive
-    # in their body, producing the same key.
-    # The test verifies that the cache key is stable for repeated identical injected bodies.
-    assert key_with == key_with  # tautology but asserts no exception
+    # This previously read `assert key_with == key_with` — a tautology that held for
+    # any _embed_key whatsoever. It sat beneath a comment asserting the opposite of
+    # this test's own name and docstring ("Keys differ because keep_alive is part of
+    # the dict passed to hashing"), and nothing could ever contradict it. The comment
+    # was simply wrong: _embed_key reads only `input` out of body_data, so keep_alive
+    # is structurally excluded from the preimage.
+    #
+    # The property is worth a real assertion. keep_alive is injected per-client before
+    # the cache lookup, so if it did reach the key, two clients asking for the same
+    # embedding with different keep_alive values would miss each other's cache entries
+    # — silently halving the hit rate this cache exists to provide.
+    assert key_with == key_without, "keep_alive must not reach the cache key preimage"
+    assert key_with == _embed_key("oqp:embed:", "nomic", json.loads(body_with)), (
+        "the key must be stable for a repeated identical injected body"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -327,5 +336,6 @@ def test_pm_label_plain_string_passthrough():
 
 
 def test_pm_label_backslash_before_quote():
-    # Backslash must be escaped before quote so \" (escaped quote) doesn't produce \\" (literal backslash + broken quote)
+    # Backslash must be escaped before quote, so \" (escaped quote) does not
+    # become \\" (literal backslash + broken quote).
     assert _pm_label('\\"') == '\\\\\\"'

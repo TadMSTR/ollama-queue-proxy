@@ -66,13 +66,21 @@ class PriorityQueueManager:
         self._overflow_code = config.overflow_status_code
         self._watermark_fired: set[str] = set()
         self._event_callbacks: list[Callable] = []
+        # The event loop keeps only a WEAK reference to a running task, so a task
+        # whose only other reference was the create_task() return value can be
+        # garbage-collected mid-execution — the callback simply never finishes, with
+        # no error anywhere. Holding a strong reference until the task completes is
+        # the documented way to prevent it (RUF006).
+        self._event_tasks: set[asyncio.Task] = set()
 
     def add_event_callback(self, cb: Callable) -> None:
         self._event_callbacks.append(cb)
 
     async def _fire_event(self, event: str, tier: str | None = None, **kwargs) -> None:
         for cb in self._event_callbacks:
-            asyncio.create_task(cb(event, tier=tier, **kwargs))
+            task = asyncio.create_task(cb(event, tier=tier, **kwargs))
+            self._event_tasks.add(task)
+            task.add_done_callback(self._event_tasks.discard)
 
     def start_workers(self) -> None:
         for _ in range(self._max_concurrent):

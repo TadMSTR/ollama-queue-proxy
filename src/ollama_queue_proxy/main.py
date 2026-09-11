@@ -7,7 +7,7 @@ import json
 import logging
 import logging.config
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -359,12 +359,11 @@ async def _enqueue_request(
         and response.status_code == 200
         and isinstance(response, JSONResponse)
     ):
-        try:
+        # Never fail a user request because of a cache write error.
+        with suppress(Exception):
             await state.embedding_cache.set(
                 path, cache_body_data, cache_model, response.body, client_id
             )
-        except Exception:
-            pass  # never fail a user request due to cache write errors
 
     response.headers["X-Queue-Wait-Time"] = str(wait_ms)
     if waited:
@@ -463,12 +462,12 @@ def run():
                 listener.bind,
             )
 
-    all_servers = [main_server] + injection_servers
+    all_servers = [main_server, *injection_servers]
 
     async def serve_all():
         tasks = [asyncio.create_task(s.serve()) for s in all_servers]
         # When any server exits (e.g. SIGTERM to main), signal all to stop
-        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        _done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         for s in all_servers:
             s.should_exit = True
         if pending:

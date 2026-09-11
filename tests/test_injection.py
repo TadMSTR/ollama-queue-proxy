@@ -61,7 +61,7 @@ def test_injection_app_responds_without_auth(tmp_path):
     key_cfg = make_key_cfg()
 
     with (
-        patch("ollama_queue_proxy.injection._shared_state") as mock_ref,
+        patch("ollama_queue_proxy.injection._shared_state"),
         patch("ollama_queue_proxy.main._enqueue_request", new_callable=AsyncMock) as mock_enqueue,
     ):
         from fastapi.responses import JSONResponse

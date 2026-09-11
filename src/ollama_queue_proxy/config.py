@@ -137,7 +137,7 @@ class InjectionListenerConfig(BaseModel):
     def valid_listen_port(cls, v: int) -> int:
         if not (1024 <= v <= 65535):
             raise ValueError(
-                f"client_injection.listeners[].listen_port must be in 1024–65535, got {v}"
+                f"client_injection.listeners[].listen_port must be in 1024-65535, got {v}"
             )
         return v
 
