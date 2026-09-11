@@ -64,7 +64,7 @@ jobs:
       # a multi-platform manifest cannot be loaded into the local daemon, which is
       # why the original verify step was amd64-only and how the gap appeared.
       - name: Build for verification
-        uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75 # v6.9.0
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           platforms: ${{ matrix.platform }}
@@ -184,7 +184,7 @@ jobs:
 
       - name: Build and push (multi-arch)
         id: push
-        uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75 # v6.9.0
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           # MUST match the verify matrix above. A platform added here and not there
