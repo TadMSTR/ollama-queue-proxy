@@ -11,13 +11,14 @@ from ollama_queue_proxy.config import QueueConfig, TierConfig
 from ollama_queue_proxy.queue import (
     PriorityQueueManager,
     QueueFull,
-    QueueFlushed,
     QueueItem,
     QueuePaused,
 )
 
 
-def make_queue_mgr(max_concurrent: int = 2, high_depth=5, normal_depth=10, low_depth=20) -> PriorityQueueManager:
+def make_queue_mgr(
+    max_concurrent: int = 2, high_depth=5, normal_depth=10, low_depth=20
+) -> PriorityQueueManager:
     config = QueueConfig(
         high=TierConfig(max_depth=high_depth, max_wait=60),
         normal=TierConfig(max_depth=normal_depth, max_wait=120),
@@ -126,6 +127,7 @@ async def test_priority_ordering():
         async def fn():
             dispatched.append(label)
             return label
+
         return fn
 
     low_item = make_item("low", "low")

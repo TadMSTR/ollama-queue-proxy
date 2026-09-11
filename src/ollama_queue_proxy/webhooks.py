@@ -6,7 +6,7 @@ import asyncio
 import ipaddress
 import logging
 import socket
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from urllib.parse import urlparse
 
 import httpx
@@ -49,9 +49,7 @@ def validate_webhook_url(url: str, allowed_hosts: list[str] | None = None) -> No
         return
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
-        raise ValueError(
-            f"Webhook URL must use http or https scheme, got: {parsed.scheme!r}"
-        )
+        raise ValueError(f"Webhook URL must use http or https scheme, got: {parsed.scheme!r}")
     host = parsed.hostname
     if not host:
         raise ValueError("Webhook URL has no hostname")
@@ -98,7 +96,7 @@ class WebhookManager:
     async def _deliver(self, event: str, tier: str | None, **kwargs) -> None:
         payload = {
             "event": event,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
         }
         if tier:
             payload["tier"] = tier

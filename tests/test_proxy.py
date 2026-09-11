@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
 
-from ollama_queue_proxy.proxy import extract_model, _MODEL_MANAGEMENT_PATHS
+from ollama_queue_proxy.proxy import _MODEL_MANAGEMENT_PATHS, extract_model
 
 
 def test_extract_model_present():
@@ -49,6 +49,7 @@ def test_chat_not_in_management_paths():
 # OQP-1: Content-Length off-by-one on non-streaming chat completions
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_non_streaming_response_content_length_correct():
     """
@@ -58,8 +59,9 @@ async def test_non_streaming_response_content_length_correct():
     The returned response must carry the correct (re-serialised) content-length.
     """
     from fastapi import Request
-    from ollama_queue_proxy.proxy import dispatch_request
+
     from ollama_queue_proxy.hosts import HostManager, OllamaHost
+    from ollama_queue_proxy.proxy import dispatch_request
     from tests.conftest import make_config
 
     payload = {"message": {"role": "assistant", "content": "hi"}, "done": True}
@@ -69,10 +71,12 @@ async def test_non_streaming_response_content_length_correct():
 
     mock_resp = MagicMock(spec=httpx.Response)
     mock_resp.status_code = 200
-    mock_resp.headers = httpx.Headers({
-        "content-type": "application/json",
-        "content-length": upstream_content_length,
-    })
+    mock_resp.headers = httpx.Headers(
+        {
+            "content-type": "application/json",
+            "content-length": upstream_content_length,
+        }
+    )
     mock_resp.json.return_value = payload
 
     mock_client = AsyncMock(spec=httpx.AsyncClient)
@@ -104,8 +108,9 @@ async def test_non_streaming_response_content_length_correct():
     )
 
     # JSONResponse uses compact separators — match that serialisation to get the correct length
-    expected_body = json.dumps(payload, ensure_ascii=False, allow_nan=False,
-                               indent=None, separators=(",", ":")).encode("utf-8")
+    expected_body = json.dumps(
+        payload, ensure_ascii=False, allow_nan=False, indent=None, separators=(",", ":")
+    ).encode("utf-8")
     assert response.headers["content-length"] == str(len(expected_body)), (
         f"content-length should be {len(expected_body)} (re-serialised body), "
         f"not {upstream_content_length} (upstream body with trailing newline)"
@@ -119,6 +124,7 @@ async def test_non_streaming_response_content_length_correct():
 # OQP-4: /api/embed returns application/json with chunked TE — must be JSONResponse
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_chunked_json_response_not_treated_as_streaming():
     """
@@ -130,18 +136,21 @@ async def test_chunked_json_response_not_treated_as_streaming():
     """
     from fastapi import Request
     from fastapi.responses import JSONResponse, StreamingResponse
-    from ollama_queue_proxy.proxy import dispatch_request
+
     from ollama_queue_proxy.hosts import HostManager, OllamaHost
+    from ollama_queue_proxy.proxy import dispatch_request
     from tests.conftest import make_config
 
     payload = {"embeddings": [[0.1, 0.2, 0.3]], "model": "bge-m3"}
 
     mock_resp = MagicMock(spec=httpx.Response)
     mock_resp.status_code = 200
-    mock_resp.headers = httpx.Headers({
-        "content-type": "application/json; charset=utf-8",
-        "transfer-encoding": "chunked",
-    })
+    mock_resp.headers = httpx.Headers(
+        {
+            "content-type": "application/json; charset=utf-8",
+            "transfer-encoding": "chunked",
+        }
+    )
     mock_resp.json.return_value = payload
 
     mock_client = AsyncMock(spec=httpx.AsyncClient)

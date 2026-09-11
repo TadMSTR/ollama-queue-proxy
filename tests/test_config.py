@@ -2,11 +2,6 @@
 
 from __future__ import annotations
 
-import os
-import sys
-import tempfile
-import textwrap
-
 import pytest
 import yaml
 
@@ -21,11 +16,7 @@ def write_config(tmp_path, data: dict) -> str:
 
 
 def base_config() -> dict:
-    return {
-        "ollama": {
-            "hosts": [{"url": "http://ollama:11434", "name": "primary"}]
-        }
-    }
+    return {"ollama": {"hosts": [{"url": "http://ollama:11434", "name": "primary"}]}}
 
 
 def test_load_minimal_config(tmp_path):
@@ -134,9 +125,7 @@ def _config_with_auth_and_injection(port: int = 11436, inject_as: str = "svc") -
         "enabled": True,
         "keys": [{"key": "secret", "client_id": inject_as, "max_priority": "low"}],
     }
-    data["client_injection"] = {
-        "listeners": [{"listen_port": port, "inject_as": inject_as}]
-    }
+    data["client_injection"] = {"listeners": [{"listen_port": port, "inject_as": inject_as}]}
     return data
 
 

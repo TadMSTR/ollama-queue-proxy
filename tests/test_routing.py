@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from ollama_queue_proxy.config import HostConfig, OllamaConfig, RoutingConfig
-from ollama_queue_proxy.routing import HostRoutingState, RoutingTable
+from ollama_queue_proxy.routing import RoutingTable
 
 
 def make_ollama_config(hosts: list[dict]) -> OllamaConfig:
@@ -44,10 +44,12 @@ def test_round_robin_single_host():
 
 
 def test_round_robin_two_hosts_equal_weight():
-    table = make_table([
-        {"url": "http://a:11434", "name": "a", "weight": 1},
-        {"url": "http://b:11434", "name": "b", "weight": 1},
-    ])
+    table = make_table(
+        [
+            {"url": "http://a:11434", "name": "a", "weight": 1},
+            {"url": "http://b:11434", "name": "b", "weight": 1},
+        ]
+    )
     for state in table._states.values():
         state.loaded_models = {"llama3"}
         state.reachable = True
@@ -58,10 +60,12 @@ def test_round_robin_two_hosts_equal_weight():
 
 
 def test_round_robin_weighted_2_to_1():
-    table = make_table([
-        {"url": "http://a:11434", "name": "a", "weight": 2},
-        {"url": "http://b:11434", "name": "b", "weight": 1},
-    ])
+    table = make_table(
+        [
+            {"url": "http://a:11434", "name": "a", "weight": 2},
+            {"url": "http://b:11434", "name": "b", "weight": 1},
+        ]
+    )
     for state in table._states.values():
         state.loaded_models = {"llama3"}
         state.reachable = True
@@ -77,10 +81,12 @@ def test_round_robin_weighted_2_to_1():
 
 
 def test_routes_to_host_with_model():
-    table = make_table([
-        {"url": "http://a:11434", "name": "a", "weight": 1},
-        {"url": "http://b:11434", "name": "b", "weight": 1},
-    ])
+    table = make_table(
+        [
+            {"url": "http://a:11434", "name": "a", "weight": 1},
+            {"url": "http://b:11434", "name": "b", "weight": 1},
+        ]
+    )
     table._states["a"].loaded_models = {"llama3"}
     table._states["a"].reachable = True
     table._states["b"].loaded_models = {"mistral"}
@@ -96,10 +102,12 @@ def test_routes_to_host_with_model():
 
 
 def test_falls_back_when_no_host_has_model():
-    table = make_table([
-        {"url": "http://a:11434", "name": "a", "weight": 1},
-        {"url": "http://b:11434", "name": "b", "weight": 1},
-    ])
+    table = make_table(
+        [
+            {"url": "http://a:11434", "name": "a", "weight": 1},
+            {"url": "http://b:11434", "name": "b", "weight": 1},
+        ]
+    )
     table._states["a"].loaded_models = set()
     table._states["a"].reachable = True
     table._states["b"].loaded_models = set()
@@ -111,10 +119,12 @@ def test_falls_back_when_no_host_has_model():
 
 
 def test_skips_unreachable_host():
-    table = make_table([
-        {"url": "http://a:11434", "name": "a", "weight": 1},
-        {"url": "http://b:11434", "name": "b", "weight": 1},
-    ])
+    table = make_table(
+        [
+            {"url": "http://a:11434", "name": "a", "weight": 1},
+            {"url": "http://b:11434", "name": "b", "weight": 1},
+        ]
+    )
     table._states["a"].loaded_models = {"llama3"}
     table._states["a"].reachable = False  # unreachable
     table._states["b"].loaded_models = {"llama3"}
@@ -126,9 +136,11 @@ def test_skips_unreachable_host():
 
 
 def test_returns_none_when_all_unreachable():
-    table = make_table([
-        {"url": "http://a:11434", "name": "a", "weight": 1},
-    ])
+    table = make_table(
+        [
+            {"url": "http://a:11434", "name": "a", "weight": 1},
+        ]
+    )
     table._states["a"].reachable = False
 
     result = table.pick("llama3")
@@ -136,10 +148,12 @@ def test_returns_none_when_all_unreachable():
 
 
 def test_no_model_field_uses_round_robin():
-    table = make_table([
-        {"url": "http://a:11434", "name": "a", "weight": 1},
-        {"url": "http://b:11434", "name": "b", "weight": 1},
-    ])
+    table = make_table(
+        [
+            {"url": "http://a:11434", "name": "a", "weight": 1},
+            {"url": "http://b:11434", "name": "b", "weight": 1},
+        ]
+    )
     for state in table._states.values():
         state.reachable = True
 
@@ -228,10 +242,12 @@ async def test_startup_probe_exits_when_all_unreachable(capsys):
 
 @pytest.mark.asyncio
 async def test_startup_probe_succeeds_with_one_reachable():
-    table = make_table([
-        {"url": "http://a:11434", "name": "a", "weight": 1},
-        {"url": "http://b:11434", "name": "b", "weight": 1},
-    ])
+    table = make_table(
+        [
+            {"url": "http://a:11434", "name": "a", "weight": 1},
+            {"url": "http://b:11434", "name": "b", "weight": 1},
+        ]
+    )
 
     good_resp = MagicMock()
     good_resp.json.return_value = {"models": [{"name": "llama3"}]}
@@ -256,10 +272,12 @@ async def test_startup_probe_succeeds_with_one_reachable():
 
 
 def test_host_model_counts():
-    table = make_table([
-        {"url": "http://a:11434", "name": "a", "weight": 1},
-        {"url": "http://b:11434", "name": "b", "weight": 1},
-    ])
+    table = make_table(
+        [
+            {"url": "http://a:11434", "name": "a", "weight": 1},
+            {"url": "http://b:11434", "name": "b", "weight": 1},
+        ]
+    )
     table._states["a"].loaded_models = {"llama3", "mistral"}
     table._states["b"].loaded_models = {"phi3"}
 
@@ -269,9 +287,11 @@ def test_host_model_counts():
 
 
 def test_routing_decisions_incremented():
-    table = make_table([
-        {"url": "http://a:11434", "name": "a", "weight": 1},
-    ])
+    table = make_table(
+        [
+            {"url": "http://a:11434", "name": "a", "weight": 1},
+        ]
+    )
     table._states["a"].loaded_models = {"llama3"}
     table._states["a"].reachable = True
 

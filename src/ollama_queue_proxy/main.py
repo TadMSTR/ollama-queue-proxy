@@ -9,7 +9,7 @@ import logging.config
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -44,7 +44,7 @@ class AppState:
     routing_table: RoutingTable | None = None
     embedding_cache: EmbeddingCache | None = None
     concurrency_manager: ClientConcurrencyManager | None = None
-    start_time: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    start_time: datetime = field(default_factory=lambda: datetime.now(UTC))
     client_stats: dict[str, dict[str, Any]] = field(default_factory=dict)
     shutting_down: bool = False
 
@@ -81,6 +81,7 @@ async def lifespan(app: FastAPI):
             validate_webhook_url(config.webhooks.url, config.webhooks.allowed_hosts)
         except ValueError as e:
             import sys
+
             print(f"FATAL: {e}", file=sys.stderr)
             sys.exit(1)
 
@@ -162,7 +163,7 @@ async def lifespan(app: FastAPI):
     logger.info("shutdown: draining in-flight requests (timeout=%ds)", drain_timeout)
     try:
         await asyncio.wait_for(queue_manager.drain(), timeout=drain_timeout)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.warning("shutdown: drain timeout after %ds", drain_timeout)
 
     await queue_manager.stop_workers()
@@ -188,9 +189,7 @@ app.include_router(status_router)
 app.include_router(queue_router)
 
 
-_KEEP_ALIVE_PATHS = frozenset({
-    "/api/generate", "/api/chat", "/api/embed", "/api/embeddings"
-})
+_KEEP_ALIVE_PATHS = frozenset({"/api/generate", "/api/chat", "/api/embed", "/api/embeddings"})
 
 
 def _inject_keep_alive(body: bytes, cfg_default: str, override: bool, max_body_mb: int) -> bytes:
@@ -262,9 +261,7 @@ async def _enqueue_request(
         if isinstance(parsed, dict):
             cache_body_data = parsed
             cache_model = extract_model(body) or ""
-            cached = await state.embedding_cache.get(
-                path, cache_body_data, cache_model, client_id
-            )
+            cached = await state.embedding_cache.get(path, cache_body_data, cache_model, client_id)
             if cached is not None:
                 # Cache hit — still track stats, skip queue
                 if client_id:

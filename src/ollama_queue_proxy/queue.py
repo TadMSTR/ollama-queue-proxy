@@ -7,8 +7,9 @@ import logging
 import math
 import time
 from collections import deque
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from .config import QueueConfig
 
@@ -146,11 +147,11 @@ class PriorityQueueManager:
                     self._stats[tier].expired += 1
                     logger.warning(
                         "queue.expired tier=%s request_id=%s age=%.1fs",
-                        tier, item.request_id, age,
+                        tier,
+                        item.request_id,
+                        age,
                     )
-                    item.future.set_exception(
-                        RequestExpired(tier, item.request_id)
-                    )
+                    item.future.set_exception(RequestExpired(tier, item.request_id))
                 else:
                     try:
                         result = await item.dispatch_fn()

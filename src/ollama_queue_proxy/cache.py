@@ -20,7 +20,7 @@ CACHEABLE_PATHS = frozenset({"/api/embed", "/api/embeddings"})
 _ERROR_LOG_COOLDOWN = 60.0
 
 # Metric counters — updated in-place, read by /metrics
-hits: dict[str, int] = {}    # keyed by (client, model, endpoint)
+hits: dict[str, int] = {}  # keyed by (client, model, endpoint)
 misses: dict[str, int] = {}
 errors: dict[str, int] = {}
 
@@ -121,7 +121,9 @@ class EmbeddingCache:
                 hits[mkey] = hits.get(mkey, 0) + 1
                 logger.debug(
                     "embedding_cache.hit endpoint=%s model=%s key_suffix=...%s",
-                    path, model, key[-8:],
+                    path,
+                    model,
+                    key[-8:],
                 )
                 return value
             misses[mkey] = misses.get(mkey, 0) + 1
@@ -148,7 +150,10 @@ class EmbeddingCache:
         if len(response_bytes) > self._cfg.max_entry_bytes:
             logger.debug(
                 "embedding_cache.skip_large endpoint=%s model=%s size=%d max=%d",
-                path, model, len(response_bytes), self._cfg.max_entry_bytes,
+                path,
+                model,
+                len(response_bytes),
+                self._cfg.max_entry_bytes,
             )
             return
 
@@ -160,7 +165,10 @@ class EmbeddingCache:
             await self._client.setex(key, self._cfg.ttl, response_bytes)
             logger.debug(
                 "embedding_cache.stored endpoint=%s model=%s key_suffix=...%s ttl=%d",
-                path, model, key[-8:], self._cfg.ttl,
+                path,
+                model,
+                key[-8:],
+                self._cfg.ttl,
             )
         except Exception as e:
             self._log_error("set", e)
@@ -183,5 +191,8 @@ class EmbeddingCache:
             self._last_error_log = now
             logger.warning(
                 "embedding_cache.error op=%s kind=%s error=%s (suppressing further logs for %ds)",
-                op, kind, exc, int(_ERROR_LOG_COOLDOWN),
+                op,
+                kind,
+                exc,
+                int(_ERROR_LOG_COOLDOWN),
             )

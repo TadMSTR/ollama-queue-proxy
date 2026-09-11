@@ -27,9 +27,7 @@ class HostConfig(BaseModel):
     @classmethod
     def positive_sync_interval(cls, v: int) -> int:
         if v < 1:
-            raise ValueError(
-                f"ollama.hosts[].model_sync_interval must be >= 1 second, got {v}"
-            )
+            raise ValueError(f"ollama.hosts[].model_sync_interval must be >= 1 second, got {v}")
         return v
 
 
@@ -77,9 +75,7 @@ class ApiKeyConfig(BaseModel):
     @classmethod
     def non_negative_concurrent(cls, v: int) -> int:
         if v < 0:
-            raise ValueError(
-                f"auth.keys[].max_concurrent must be a non-negative integer, got {v}"
-            )
+            raise ValueError(f"auth.keys[].max_concurrent must be a non-negative integer, got {v}")
         return v
 
 
@@ -94,7 +90,7 @@ class AuthConfig(BaseModel):
     rate_limit: RateLimitConfig = RateLimitConfig()
 
     @model_validator(mode="after")
-    def keys_required_when_enabled(self) -> "AuthConfig":
+    def keys_required_when_enabled(self) -> AuthConfig:
         if self.enabled and len(self.keys) == 0:
             print(
                 "FATAL: auth.enabled is true but no API keys are configured. "
@@ -185,7 +181,7 @@ class Config(BaseModel):
     keep_alive: KeepAliveConfig = KeepAliveConfig()
 
     @model_validator(mode="after")
-    def validate_v2_constraints(self) -> "Config":
+    def validate_v2_constraints(self) -> Config:
         self._validate_injection_ports()
         self._validate_inject_as_refs()
         self._validate_client_max_concurrent()
@@ -246,8 +242,7 @@ class Config(BaseModel):
     def _warn_public_injection_no_auth(self) -> None:
         loopback = {"127.0.0.1", "localhost", "::1"}
         has_non_loopback = any(
-            listener.bind not in loopback
-            for listener in self.client_injection.listeners
+            listener.bind not in loopback for listener in self.client_injection.listeners
         )
         if self.client_injection.allow_public_injection and not self.auth.enabled:
             print(

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Request
@@ -55,17 +55,19 @@ async def queue_status(request: Request):
 
     hosts_data = []
     for host in state.host_manager.hosts:
-        hosts_data.append({
-            "name": host.name,
-            "url": host.url,
-            "healthy": host.healthy,
-            "models": host.models,
-            "last_checked": host.last_checked.isoformat() if host.last_checked else None,
-            "requests_handled": host.requests_handled,
-            "failures": host.failures,
-        })
+        hosts_data.append(
+            {
+                "name": host.name,
+                "url": host.url,
+                "healthy": host.healthy,
+                "models": host.models,
+                "last_checked": host.last_checked.isoformat() if host.last_checked else None,
+                "requests_handled": host.requests_handled,
+                "failures": host.failures,
+            }
+        )
 
-    uptime = (datetime.now(timezone.utc) - state.start_time).total_seconds()
+    uptime = (datetime.now(UTC) - state.start_time).total_seconds()
 
     # Client stats
     clients_data = {}
@@ -109,7 +111,7 @@ async def metrics(request: Request):
     q_mgr = state.queue_manager
     depths = q_mgr.queue_depths()
     stats = q_mgr.stats()
-    uptime = (datetime.now(timezone.utc) - state.start_time).total_seconds()
+    uptime = (datetime.now(UTC) - state.start_time).total_seconds()
 
     lines = [
         "# HELP oqp_queue_depth Current number of requests waiting in queue",

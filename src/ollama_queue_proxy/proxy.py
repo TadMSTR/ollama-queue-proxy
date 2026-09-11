@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
 
 import httpx
 from fastapi import Request
@@ -222,8 +222,7 @@ async def dispatch_request(
             # true streaming responses.
             content_type = resp.headers.get("content-type", "")
             is_streaming = (
-                "text/event-stream" in content_type
-                or "application/x-ndjson" in content_type
+                "text/event-stream" in content_type or "application/x-ndjson" in content_type
             )
 
             response_headers = {
@@ -231,6 +230,7 @@ async def dispatch_request(
             }
 
             if is_streaming:
+
                 async def stream_gen(r=resp):
                     try:
                         async for chunk in r.aiter_bytes():
@@ -253,7 +253,8 @@ async def dispatch_request(
             else:
                 ct = resp.headers.get("content-type", "")
                 passthrough_headers = {
-                    k: v for k, v in resp.headers.items()
+                    k: v
+                    for k, v in resp.headers.items()
                     if k.lower() not in _STRIP_RESPONSE_HEADERS
                 }
                 return JSONResponse(

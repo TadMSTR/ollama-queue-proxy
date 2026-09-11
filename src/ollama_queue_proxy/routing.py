@@ -79,9 +79,7 @@ class RoutingTable:
             *[self._poll_host(state) for state in self._states.values()],
             return_exceptions=True,
         )
-        reachable_count = sum(
-            1 for state in self._states.values() if state.reachable
-        )
+        reachable_count = sum(1 for state in self._states.values() if state.reachable)
         if reachable_count == 0:
             import sys
 
@@ -129,9 +127,7 @@ class RoutingTable:
             async with self._lock:
                 state.loaded_models = models
                 state.reachable = True
-            logger.debug(
-                "routing.poll host=%s models=%d", state.name, len(models)
-            )
+            logger.debug("routing.poll host=%s models=%d", state.name, len(models))
         except Exception as e:
             async with self._lock:
                 state.reachable = False
@@ -146,9 +142,7 @@ class RoutingTable:
         state = self._states.get(host_name)
         if state:
             state.loaded_models.discard(model)
-            logger.debug(
-                "routing.invalidated host=%s model=%s", host_name, model
-            )
+            logger.debug("routing.invalidated host=%s model=%s", host_name, model)
 
     def pick(self, model: str | None) -> HostRoutingState | None:
         """

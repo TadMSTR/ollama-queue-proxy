@@ -10,19 +10,16 @@ from __future__ import annotations
 
 import json
 import os
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from ollama_queue_proxy.cache import (
-    CACHEABLE_PATHS,
     EmbeddingCache,
     _embed_key,
-    _embeddings_key,
 )
 from ollama_queue_proxy.concurrency import ClientConcurrencyManager
 from ollama_queue_proxy.config import ApiKeyConfig, EmbeddingCacheConfig
-from ollama_queue_proxy.main import _inject_keep_alive
 from ollama_queue_proxy.routes.status import _pm_label
 from ollama_queue_proxy.routing import RoutingTable
 
@@ -114,7 +111,8 @@ def test_injection_port_client_id_with_cache_hit():
     inj_mod._shared_state = mock_state
 
     # Verify injection app would pass the correct client_id to _enqueue_request
-    from unittest.mock import patch, AsyncMock
+    from unittest.mock import patch
+
     from fastapi.responses import JSONResponse
 
     captured_client_id = {}
@@ -125,6 +123,7 @@ def test_injection_port_client_id_with_cache_hit():
 
     with patch("ollama_queue_proxy.main._enqueue_request", side_effect=fake_enqueue):
         from fastapi.testclient import TestClient
+
         from ollama_queue_proxy.injection import make_injection_app
 
         inj_app = make_injection_app("memsearch", key_cfg)
@@ -177,10 +176,12 @@ async def test_capped_batch_does_not_block_interactive():
     A batch client at concurrency cap must not block an interactive (high-priority)
     client from acquiring its own concurrency slot.
     """
-    mgr = ClientConcurrencyManager([
-        ApiKeyConfig(key="k1", client_id="batch", max_concurrent=1),
-        ApiKeyConfig(key="k2", client_id="interactive", max_concurrent=0),
-    ])
+    mgr = ClientConcurrencyManager(
+        [
+            ApiKeyConfig(key="k1", client_id="batch", max_concurrent=1),
+            ApiKeyConfig(key="k2", client_id="interactive", max_concurrent=0),
+        ]
+    )
 
     # Fill batch client's cap
     await mgr.acquire("batch")
@@ -194,6 +195,7 @@ async def test_capped_batch_does_not_block_interactive():
         interactive_done = True
 
     import asyncio
+
     task = asyncio.create_task(interactive_acquire())
     await asyncio.sleep(0.05)
     assert interactive_done, "Interactive (unlimited) client must not be blocked by batch cap"
@@ -210,10 +212,11 @@ def test_injection_handler_accepts_streaming_path():
     The injection handler registers the catch-all route so streaming paths
     like /api/generate are accepted (not 404).
     """
+    from fastapi.responses import JSONResponse
+    from fastapi.testclient import TestClient
+
     import ollama_queue_proxy.injection as inj_mod
     from ollama_queue_proxy.injection import make_injection_app
-    from fastapi.testclient import TestClient
-    from fastapi.responses import JSONResponse
 
     key_cfg = ApiKeyConfig(key="k", client_id="streamer", max_priority="normal")
 
@@ -248,8 +251,8 @@ def test_model_aware_routing_picks_model_host():
     host that has llama3 loaded, regardless of which host is 'first'.
     """
     from unittest.mock import MagicMock
+
     from ollama_queue_proxy.config import HostConfig, OllamaConfig, RoutingConfig
-    from ollama_queue_proxy.routing import RoutingTable
 
     ollama_cfg = OllamaConfig(
         hosts=[
@@ -279,12 +282,11 @@ def test_model_aware_routing_picks_model_host():
 def test_v1_config_still_passes_tests(tmp_path):
     """A pure v0.1.x config must load and produce default v0.2.0 behaviours."""
     import yaml
+
     from ollama_queue_proxy.config import load_config
 
     data = {
-        "ollama": {
-            "hosts": [{"url": "http://ollama:11434", "name": "primary"}]
-        },
+        "ollama": {"hosts": [{"url": "http://ollama:11434", "name": "primary"}]},
         "auth": {
             "enabled": True,
             "keys": [{"key": "mykey", "client_id": "svc", "max_priority": "high"}],

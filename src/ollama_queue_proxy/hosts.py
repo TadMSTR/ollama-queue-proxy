@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import httpx
 
@@ -28,9 +28,7 @@ class OllamaHost:
 class HostManager:
     def __init__(self, config: OllamaConfig) -> None:
         self._config = config
-        self.hosts: list[OllamaHost] = [
-            OllamaHost(url=h.url, name=h.name) for h in config.hosts
-        ]
+        self.hosts: list[OllamaHost] = [OllamaHost(url=h.url, name=h.name) for h in config.hosts]
         self._check_task: asyncio.Task | None = None
 
     async def startup_check(self, client: httpx.AsyncClient) -> None:
@@ -68,7 +66,7 @@ class HostManager:
             was_unhealthy = not host.healthy
             host.healthy = True
             host.models = models
-            host.last_checked = datetime.now(timezone.utc)
+            host.last_checked = datetime.now(UTC)
             if was_unhealthy:
                 logger.warning("host.recovered name=%s models=%d", host.name, len(models))
             else:
@@ -79,7 +77,7 @@ class HostManager:
         except Exception as e:
             was_healthy = host.healthy
             host.healthy = False
-            host.last_checked = datetime.now(timezone.utc)
+            host.last_checked = datetime.now(UTC)
             if was_healthy:
                 logger.warning("host.unhealthy name=%s error=%s", host.name, e)
 
