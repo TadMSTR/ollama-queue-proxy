@@ -55,9 +55,9 @@ async def dashboard(request: Request):
     if err:
         return err
 
-    return HTMLResponse(_PAGE.replace("__REFRESH_MS__", json.dumps(
-        state.config.dashboard.refresh_seconds * 1000
-    )))
+    return HTMLResponse(
+        _PAGE.replace("__REFRESH_MS__", json.dumps(state.config.dashboard.refresh_seconds * 1000))
+    )
 
 
 # The single interpolation into this document is the refresh interval, substituted as a
