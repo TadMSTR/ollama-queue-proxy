@@ -118,7 +118,7 @@ def test_injection_port_client_id_with_cache_hit():
 
     captured_client_id = {}
 
-    async def fake_enqueue(request, client_id, tier, state, reentries=0):
+    async def fake_enqueue(request, client_id, tier, state, reentries=0, key_cfg=None):
         captured_client_id["id"] = client_id
         return JSONResponse(status_code=200, content={"embeddings": [[0.1]]})
 
@@ -234,7 +234,7 @@ def test_injection_handler_accepts_streaming_path():
     mock_state.shutting_down = False
     inj_mod._shared_state = mock_state
 
-    async def fake_enqueue(request, client_id, tier, state, reentries=0):
+    async def fake_enqueue(request, client_id, tier, state, reentries=0, key_cfg=None):
         return JSONResponse(status_code=200, content={"response": "ok"})
 
     with patch("ollama_queue_proxy.main._enqueue_request", side_effect=fake_enqueue):

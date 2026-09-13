@@ -2,6 +2,40 @@
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-13
+
+Introduces a read-only key scope so a visibility consumer can be credentialed without being handed GPU time, then gives the proxy a self-contained way to show its own state: a flat `GET /queue/summary`, an embedded read-only dashboard, and a documented Homepage widget. Additive — one config key is deprecated, none removed, and a 0.4.0 config runs unchanged. Tracker: vikunja#826 (closes #789).
+
+### Added
+
+- **`auth.keys[].scope` — one ordered axis with three cumulative levels: `read` < `inference` < `management`.** `inference` is the default because it is what every key did before 0.5.0; an existing config keeps working with no edit.
+
+  The gap this closes: there was previously **no key that could not buy GPU time**. `management: false` gated the four queue-control endpoints and nothing else, so any credential handed to a status widget or a metrics scraper also bought inference. `scope: read` is what makes those safe to credential.
+
+  Enforced through a single comparison (`ApiKeyConfig.allows`) at every gate, including the proxy catch-all, which had no scope check of any kind, and the **injection listener** — `make_injection_app()` previously honoured only `max_priority`, so a read-only key injected on a listener port would still have proxied inference. That is the least visible of the bypasses and the one a partial implementation leaves open. A refusal is `403` naming only the scope that was *required*, never the one the caller holds; `401` still means an unknown credential.
+
+  `read` cannot reach Ollama **at all**, including the metadata fast path (`/api/tags`, `/api/version`, `/api/ps`, `/api/show`, `/`). The rule is "read sees the proxy's own state, nothing upstream", rather than "…except these five paths".
+
+- **`GET /queue/summary`** — flat scalars, nothing nested, no identity in the payload. `/queue/status` cannot drive a status widget: widgets map dot-paths to scalars and cannot sum, filter or count by predicate, so total queued across tiers, healthy-hosts-versus-total, total processed/rejected/expired and active client count were all underivable from it. Every field is a rollup of state that already existed — no new collection, no new counters. `/queue/status` is unchanged; it is a consumed HTTP surface and this is additive rather than a reshape.
+
+- **Embedded read-only dashboard at `/dashboard`**, `dashboard.enabled: false` by default. One self-contained HTML document from one route — inline CSS and JS, **no new dependencies**, no build step and no CDN fetch, so it renders on an air-gapped host. Disabled returns **404, not 401**: a feature you have turned off should not advertise itself to a caller who cannot use it. Read-only by construction — it exposes no pause/resume/drain/flush, since the page is reachable with `read` and a control would be dead UI for most callers and an escalation for the rest. Served at `/dashboard` and not `/`, which is proxied to Ollama. Requires `read`; the page embeds no credential and polls same-origin relative URLs so it inherits whatever authenticated the document. Sent with a **nonce-based Content-Security-Policy** (`default-src 'none'`, no `unsafe-inline`) plus `X-Content-Type-Options`, `Referrer-Policy` and `X-Frame-Options`. The nonce is fresh per response: the page's inline CSS and JS are deliberate, and `unsafe-inline` would have admitted them along with anything injected, which would make the policy a restatement of the `textContent` escaping rather than an independent barrier behind it.
+
+- **`release.yml` now creates the GitHub Release** (#789). All eight prior releases were made by hand because the workflow published the image and stopped — invisible in the way that let it survive eight repetitions, since the tag existed and the image was correct. The step runs **after** the attestation, so a failed attestation cannot leave a Release advertising an image nothing signed, and carries no `continue-on-error`. Notes come from this file's section for the tag rather than an auto-generated commit list, via `tests/extract_changelog_section.py` — a committed script rather than inlined shell, so the code that runs at tag time is exercised by the test suite on every push. `contents: write` is raised on the `publish` job alone; the workflow default stays `contents: read`.
+
+### Deprecated
+
+- **`auth.keys[].management`** is superseded by `auth.keys[].scope`. `management: true` still works, maps to `scope: management`, and logs a warning at startup naming the `client_id`. Setting **both** `management: true` and a `scope` that is not `management` is a startup error rather than a silent precedence rule — a config that contradicts itself about a privilege should not boot and pick a winner. An explicit `management: false` conflicts with nothing: it is the field's default, so it asserts nothing, and leaving those lines in place while adding `scope:` elsewhere is a supported migration.
+
+### Documented
+
+- README: a key-scope table, the deprecation, the auth-off caveat restated for scope, a `/queue/summary` section, a dashboard section, and a Homepage `customapi` sample plus a `dynamic-list` per-host sample that needs no new code. The widget sample uses `{{HOMEPAGE_FILE_OQP_READONLY_KEY}}`: Homepage substitutes **only** `{{HOMEPAGE_VAR_*}}` and `{{HOMEPAGE_FILE_*}}`, so a `${VAR}` sample would ship broken and fail authentication with the literal string as the token.
+- The endpoint table now names the scope each endpoint requires, and the Prometheus scraper example uses `scope: read` — a scraper reads `/metrics` and has no business being able to spend GPU time.
+- `config.example.yml` documents `scope` and the `dashboard` block, with the reasons stated **at the key**: why the dashboard cannot take `/`, why it has no configurable `path`, and that scope is unenforced when `auth.enabled: false`.
+
+### Compatibility
+
+Verified against the reference deployment's current unmodified `config.yml` — 11 keys, `management:` written on every one, no `scope:` anywhere: all 11 still proxy inference, only `admin` reaches the management endpoints, the injection listener is unaffected, and exactly one deprecation warning fires.
+
 ## [0.4.0] - 2026-09-11
 
 Repositions the project as **multi-tenant admission control for a shared Ollama** rather than a fleet pool manager, brings the repo to the fleet Baseline standard, and corrects four README claims the code did not implement. Tracker: vikunja#786 (folds in #236, #708).

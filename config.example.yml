@@ -90,25 +90,53 @@ auth:
   enabled: false             # set true to require API keys on all requests
   # WARNING: auth.enabled: true with no keys configured is a fatal startup error.
   keys: []
-  # Example keys (v0.2.0 — includes new max_concurrent field):
+  # Example keys:
   # - key: "${ADMIN_API_KEY}"       # or hardcode, but use env vars for real deployments
   #   client_id: "admin"
   #   description: "Admin key — full access"
   #   max_priority: high
-  #   management: true              # required to call /queue/pause, /drain, /flush
+  #   scope: management             # required to call /queue/pause, /drain, /flush
   #   max_concurrent: 0            # 0 = unlimited (subject to proxy.max_concurrent)
   # - key: "${OPENWEBUI_API_KEY}"
   #   client_id: "openwebui"
   #   description: "Open WebUI — interactive"
   #   max_priority: high
-  #   management: false
+  #   scope: inference              # the default; may be omitted
   #   max_concurrent: 0
   # - key: "${MEMSEARCH_API_KEY}"
   #   client_id: "memsearch-watch"
   #   description: "Background embedding re-index jobs"
   #   max_priority: low
-  #   management: false
   #   max_concurrent: 2            # cap batch client at 2 concurrent
+  # - key: "${HOMEPAGE_API_KEY}"
+  #   client_id: "homepage"
+  #   description: "Status widget / dashboard — cannot spend GPU time"
+  #   scope: read
+  #
+  # scope: one ordered axis, three cumulative levels. Default `inference`.
+  #
+  #   read        /queue/status, /queue/summary, /metrics, /dashboard. NOTHING upstream —
+  #               refused at /api/generate AND at cheap metadata reads like /api/tags, so
+  #               the rule is "read sees the proxy, not Ollama" with no path exceptions.
+  #   inference   the above, plus proxying requests to Ollama. What every key did before
+  #               0.5.0, which is why it is the default: an existing config keeps working.
+  #   management  the above, plus /queue/pause, /resume, /drain, /flush.
+  #
+  # Issue `scope: read` to anything that only needs to LOOK at the proxy — a status
+  # widget, a Prometheus scraper, the dashboard. Before 0.5.0 no such key existed: every
+  # credential, `management: false` included, could buy GPU time.
+  #
+  # SCOPE IS UNENFORCED WHEN auth.enabled IS FALSE. No key is presented, so there is no
+  # scope to check and every endpoint is open to anyone who can reach the port. This is
+  # the same caveat that always applied to `management`; it now covers `scope` too.
+  #
+  # DEPRECATED: `management: true` still works and maps to scope: management, logging a
+  # warning at startup that names the client_id. Setting BOTH management: true and a
+  # scope that is not management is a startup error, not a precedence rule — a config
+  # that contradicts itself about a privilege should not boot and pick a winner. An
+  # explicit `management: false` conflicts with nothing: it is the field's default, so
+  # it asserts nothing, and leaving those lines in place while adding scope: elsewhere
+  # is a supported migration.
   # Each entry needs EXACTLY ONE of key / key_env / key_file:
   #
   #   key:      "literal"                    literal in this file
@@ -221,3 +249,35 @@ logging:
 # keep_alive:
 #   default: "5m"
 #   override: false
+
+# ---------------------------------------------------------------------------
+# Embedded read-only dashboard
+# ---------------------------------------------------------------------------
+dashboard:
+  # Default false: it fails closed, and a new surface should be opted into rather than
+  # appearing on every deployment that upgrades. When false, /dashboard returns 404 —
+  # not 401 — because a feature you have turned off should not advertise itself to a
+  # caller who cannot use it.
+  enabled: false
+
+  # Browser poll interval for /queue/summary and /queue/status. Polling stops while the
+  # tab is hidden.
+  refresh_seconds: 5
+
+  # THERE IS NO `path` KEY, deliberately. The dashboard is always served at /dashboard.
+  #
+  # It must not take "/": that path is in the metadata fast-path list and is proxied to
+  # Ollama, where it answers "Ollama is running", so taking it would break every
+  # Ollama-compatible client that probes the root. A fixed path settles that by
+  # construction rather than by a validator an operator can defeat.
+  #
+  # The route is also registered before config is read, so that a DISABLED dashboard can
+  # answer its own 404 rather than falling through to the proxy catch-all — which would
+  # either refuse the caller as inference or forward "/dashboard" to Ollama. Neither
+  # discloses less than a 404 does.
+  #
+  # Requires `read` scope. With auth.enabled: true a browser cannot send an
+  # Authorization header on a navigation, so put it behind a reverse proxy that injects
+  # the header or a forward-auth layer that sets a cookie; the page's own polls are
+  # same-origin and inherit whatever authenticated the page. No key is embedded in the
+  # HTML.

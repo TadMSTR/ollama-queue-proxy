@@ -203,9 +203,11 @@ def test_injection_priority_ceiling_enforced():
     inj_mod._shared_state = mock_state
 
     captured_tier = {}
+    captured_key_cfg = {}
 
-    async def fake_enqueue(request, client_id, tier, state):
+    async def fake_enqueue(request, client_id, tier, state, key_cfg=None):
         captured_tier["tier"] = tier
+        captured_key_cfg["key_cfg"] = key_cfg
         from fastapi.responses import JSONResponse
 
         return JSONResponse(status_code=200, content={})
@@ -223,6 +225,13 @@ def test_injection_priority_ceiling_enforced():
 
     assert captured_tier.get("tier") == "low", (
         f"Expected priority capped to 'low', got {captured_tier.get('tier')}"
+    )
+    # The listener must hand the key's whole policy down, not just the tier it derived
+    # from it. `_enqueue_request` is where scope is enforced, and it can only enforce a
+    # scope it was given — dropping this argument is the exact shape of the injection
+    # bypass, and it would not otherwise change any assertion in this file.
+    assert captured_key_cfg.get("key_cfg") is key_cfg, (
+        "injection handler must forward key_cfg to _enqueue_request"
     )
 
     inj_mod._shared_state = None  # cleanup

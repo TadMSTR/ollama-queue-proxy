@@ -152,7 +152,10 @@ jobs:
     needs: verify
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      # write, not read: this job creates the GitHub Release at the end. Raised on the
+      # job alone — the workflow-level default above stays `contents: read`, so the
+      # verify matrix cannot write to the repository.
+      contents: write
       packages: write
       id-token: write # OIDC, required to sign the provenance attestation
       attestations: write # write the attestation back to the repository
@@ -212,3 +215,35 @@ jobs:
           subject-name: ghcr.io/${{ github.repository }}
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
+
+      # ---- the GitHub Release, last -------------------------------------------------
+      #
+      # All eight releases before 0.5.0 were created by hand, because this workflow
+      # published the image and stopped (vikunja#789). The failure was invisible in
+      # exactly the way that makes it survive: the tag existed, the image was correct,
+      # and only the thing a human reads was missing.
+      #
+      # LAST ON PURPOSE. After the attestation, so a failed attestation cannot leave a
+      # published Release advertising an image nothing signed. The ordering is the
+      # gate — a Release created earlier would still be there after a later step failed.
+      #
+      # No `continue-on-error` anywhere in this job: a tag that publishes a container
+      # and silently skips the Release is the precise bug being fixed here, and
+      # tolerating the failure would reproduce it with extra steps.
+      - name: Extract the release notes from CHANGELOG.md
+        run: |
+          set -euo pipefail
+          python3 tests/extract_changelog_section.py "${GITHUB_REF_NAME}" \
+            > "${RUNNER_TEMP}/release-notes.md"
+          echo "--- notes for ${GITHUB_REF_NAME} ---"
+          cat "${RUNNER_TEMP}/release-notes.md"
+
+      # Not `generate_release_notes: true`. This repo's CHANGELOG entries are written
+      # deliberately and explain why each change was made; an auto-generated commit
+      # list is strictly worse and would quietly replace them.
+      - name: Create the GitHub Release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          name: ${{ github.ref_name }}
+          body_path: ${{ runner.temp }}/release-notes.md
+          make_latest: true

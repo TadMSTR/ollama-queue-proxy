@@ -76,6 +76,13 @@ class WebhookConfig(BaseModel):
     allowed_hosts: list[str] = []  # hostnames exempt from SSRF check (for internal ntfy etc.)
 
 
+# Scope levels, ordered and strictly cumulative: management > inference > read.
+# ONE axis, three named states. A second boolean alongside `management:` would give four
+# states of which one ("may manage the queue but may not use it") is nonsense, and the
+# nonsense state is the one nobody writes a test for.
+SCOPE_ORDER: dict[str, int] = {"read": 0, "inference": 1, "management": 2}
+
+
 class ApiKeyConfig(BaseModel):
     """One consumer's credential and the policy attached to it.
 
@@ -98,6 +105,14 @@ class ApiKeyConfig(BaseModel):
     client_id: str
     description: str | None = None
     max_priority: Literal["high", "normal", "low"] = "normal"
+    # `inference` is the default because it is what EVERY key did before 0.5.0 — there
+    # was no key that could not buy GPU time. An existing config must keep working with
+    # no edit, so the default has to be the old behaviour, not the safer one.
+    scope: Literal["read", "inference", "management"] = "inference"
+    # DEPRECATED in 0.5.0, still honoured. Superseded by `scope`. Deliberately not
+    # removed: it is a shipped key on deployed services (11 of them on the reference
+    # deployment), and removing it would turn a working config into a boot failure on
+    # upgrade. See `reconcile_deprecated_management` below.
     management: bool = False
     max_concurrent: int = 0  # 0 = unlimited (subject to proxy.max_concurrent)
 
@@ -107,6 +122,48 @@ class ApiKeyConfig(BaseModel):
         if v < 0:
             raise ValueError(f"auth.keys[].max_concurrent must be a non-negative integer, got {v}")
         return v
+
+    def allows(self, required: str) -> bool:
+        """True if this key's scope is at or above `required`.
+
+        Every scope decision in the codebase goes through this one comparison. Spelled
+        out per call site instead, adding a fourth level would mean finding each of
+        them by hand — and the one that was missed would fail OPEN, which is the only
+        direction that matters.
+
+        An unknown `required` raises KeyError rather than returning False. Every caller
+        passes a literal, so a typo is a coding error, and a 500 is a louder and safer
+        answer than silently granting or silently refusing.
+        """
+        return SCOPE_ORDER[self.scope] >= SCOPE_ORDER[required]
+
+    @model_validator(mode="after")
+    def reconcile_deprecated_management(self) -> ApiKeyConfig:
+        """Map the deprecated `management: bool` onto `scope`, or refuse to boot.
+
+        `management: true` on its own still grants management — that is the entire point
+        of deprecating rather than removing it. What is refused is a config that sets
+        both and disagrees with itself. Resolving that by precedence would settle a
+        privilege question silently, and whichever way the rule went, half the operators
+        who wrote it would get the opposite of what they meant.
+
+        `management: false` is NOT treated as conflicting with a higher scope. It is the
+        field's default value, so writing it asserts nothing and is indistinguishable
+        from a key that never mentioned the deprecated field — whereas an explicit
+        `true` is a privilege claim that genuinely can conflict. This also keeps the
+        obvious migration (leave the old `management: false` lines alone, add `scope:`
+        to the one key that needs it) from becoming a boot failure.
+        """
+        if not self.management:
+            return self
+        if "scope" in self.model_fields_set and self.scope != "management":
+            raise ValueError(
+                f"auth.keys[] entry for client_id={self.client_id!r} sets both "
+                f"management: true and scope: {self.scope!r}, which contradict each "
+                "other. `management` is deprecated: set scope: management on its own."
+            )
+        self.scope = "management"
+        return self
 
     @model_validator(mode="after")
     def resolve_key_source(self) -> ApiKeyConfig:
@@ -266,6 +323,34 @@ class EmbeddingCacheConfig(BaseModel):
     connect_timeout: int = 2
 
 
+class DashboardConfig(BaseModel):
+    """The embedded read-only dashboard.
+
+    There is deliberately no `path` key. The route is registered at import time so that
+    a disabled dashboard can answer 404 itself; left unregistered it would fall through
+    to the proxy catch-all and either be refused as inference or forwarded to Ollama,
+    both of which disclose more than a 404 does. Config is not loaded at import time, so
+    an unconditional registration cannot take a configured path.
+
+    A fixed path also settles the one hard constraint by construction: the dashboard must
+    not take "/", which is in the metadata fast-path list and is proxied to Ollama to
+    answer "Ollama is running". With no key there is no validator to get wrong and no
+    way for an operator to violate it.
+    """
+
+    # Off by default: it fails closed, and a brand-new surface should be opted into
+    # rather than appearing on every deployment that upgrades.
+    enabled: bool = False
+    refresh_seconds: int = 5
+
+    @field_validator("refresh_seconds")
+    @classmethod
+    def positive_refresh(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"dashboard.refresh_seconds must be >= 1 second, got {v}")
+        return v
+
+
 class KeepAliveConfig(BaseModel):
     default: str = "5m"
     override: bool = False
@@ -283,6 +368,7 @@ class Config(BaseModel):
     routing: RoutingConfig = RoutingConfig()
     embedding_cache: EmbeddingCacheConfig = EmbeddingCacheConfig()
     keep_alive: KeepAliveConfig = KeepAliveConfig()
+    dashboard: DashboardConfig = DashboardConfig()
 
     @model_validator(mode="after")
     def validate_v2_constraints(self) -> Config:
