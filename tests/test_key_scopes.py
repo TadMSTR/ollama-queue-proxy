@@ -16,6 +16,7 @@ False. Only both together distinguish a working gate from either failure.
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -49,6 +50,7 @@ KEYS: dict[str, ApiKeyConfig] = {
 GRANTS: dict[str, dict[str, bool]] = {
     #  surface        read    inference  management
     "status": {"read": True, "inference": True, "management": True},
+    "summary": {"read": True, "inference": True, "management": True},
     "metrics": {"read": True, "inference": True, "management": True},
     "inference": {"read": False, "inference": True, "management": True},
     "management": {"read": False, "inference": False, "management": True},
@@ -81,6 +83,7 @@ def build_route_client(keys: list[ApiKeyConfig] | None = None, auth_enabled: boo
         t: MagicMock(processed=0, rejected=0, expired=0) for t in ("high", "normal", "low")
     }
     state.queue_manager.active_count.return_value = 0
+    state.start_time = datetime.now(UTC) - timedelta(seconds=60)
     state.routing_table.hosts = []
     state.routing_table.host_model_counts.return_value = {}
     state.routing_table.routing_decisions = {}
@@ -151,6 +154,8 @@ async def _attempt(surface: str, scope: str) -> int:
     headers = _auth(KEYS[scope].key)
     if surface == "status":
         return client.get("/queue/status", headers=headers).status_code
+    if surface == "summary":
+        return client.get("/queue/summary", headers=headers).status_code
     if surface == "metrics":
         return client.get("/metrics", headers=headers).status_code
     if surface == "management":
@@ -159,7 +164,7 @@ async def _attempt(surface: str, scope: str) -> int:
 
 
 # ---------------------------------------------------------------------------
-# The matrix — 3 scopes x 4 surfaces
+# The matrix — 3 scopes x 5 surfaces
 # ---------------------------------------------------------------------------
 
 
@@ -167,6 +172,7 @@ async def _attempt(surface: str, scope: str) -> int:
 @pytest.mark.parametrize("scope", SCOPES)
 @pytest.mark.asyncio
 async def test_scope_matrix(scope: str, surface: str):
+    """3 scopes x 5 surfaces. Read the GRANTS table above for the expected outcome."""
     expected_ok = GRANTS[surface][scope]
     code = await _attempt(surface, scope)
     if expected_ok:
@@ -181,7 +187,7 @@ def test_the_matrix_contains_both_outcomes():
     not the code, so it cannot be caught by the parametrised test."""
     cells = [v for row in GRANTS.values() for v in row.values()]
     assert True in cells and False in cells
-    assert len(cells) == 12
+    assert len(cells) == 15
 
 
 # ---------------------------------------------------------------------------

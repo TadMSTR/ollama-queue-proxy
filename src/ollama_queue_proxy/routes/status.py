@@ -104,6 +104,49 @@ async def queue_status(request: Request):
     }
 
 
+@router.get("/queue/summary")
+async def queue_summary(request: Request):
+    """Flat scalars for a dashboard tile. Requires `read`.
+
+    Exists because `/queue/status` cannot drive one. Homepage's `customapi` widget maps
+    dot-paths to scalars and its whole transformation vocabulary is remap/scale/prefix/
+    suffix — no sum, no filter, no count-by-predicate. So four of the six things an
+    operator wants on a tile are underivable from `/queue/status`: total queued (three
+    separate per-tier depths), healthy hosts (an array needing a predicate), total
+    processed/rejected/expired (per-tier only), and active clients (a map keyed by
+    client_id). This endpoint precomputes exactly those rollups.
+
+    EVERY VALUE IS A SCALAR. That is the contract with the widget, not a stylistic
+    preference: a dict or list here renders as a blank row, and it does so weeks later
+    in someone else's dashboard rather than here. Nothing is derived from new
+    collection — every field is a rollup of state that already existed.
+
+    NO IDENTITY IN THE PAYLOAD. No client_id, no host URL, no key count, even though
+    this is authenticated. It is the response most likely to end up on a wall display.
+    """
+    err = await require_scope(request, "read")
+    if err:
+        return err
+
+    state: AppState = request.app.state.oqp
+    q_mgr = state.queue_manager
+    stats = q_mgr.stats()
+    hosts = state.routing_table.hosts
+
+    return {
+        "status": "ok",
+        "queued": sum(q_mgr.queue_depths().values()),
+        "active": q_mgr.active_count(),
+        "max_concurrent": state.config.proxy.max_concurrent,
+        "hosts_healthy": sum(1 for h in hosts if h.reachable),
+        "hosts_total": len(hosts),
+        "processed": sum(stats[t].processed for t in ("high", "normal", "low")),
+        "rejected": sum(stats[t].rejected for t in ("high", "normal", "low")),
+        "expired": sum(stats[t].expired for t in ("high", "normal", "low")),
+        "uptime_seconds": int((datetime.now(UTC) - state.start_time).total_seconds()),
+    }
+
+
 @router.get("/metrics")
 async def metrics(request: Request):
     """Prometheus text exposition format."""
