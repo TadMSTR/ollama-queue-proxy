@@ -186,19 +186,22 @@ auth:
       client_id: "openwebui"
       description: "Open WebUI"
       max_priority: high
-      management: false
+      scope: inference         # the default — may proxy, may not manage the queue
       max_concurrent: 0        # unlimited (subject to proxy.max_concurrent)
     - key: "sk-my-batch-key"
       client_id: "memsearch-watch"
       description: "Background embedding jobs"
       max_priority: low
       max_concurrent: 2        # cap at 2 concurrent so it can't starve interactive users
-      management: false
     - key: "sk-my-admin-key"
       client_id: "admin"
       description: "Admin"
       max_priority: high
-      management: true
+      scope: management
+    - key: "sk-my-readonly-key"
+      client_id: "homepage"
+      description: "Status widget — cannot spend GPU time"
+      scope: read
 ```
 
 Consumers pass their key as a Bearer token:
@@ -213,7 +216,25 @@ Authorization: Bearer sk-my-interactive-key
 
 **Per-client concurrency caps:** `max_concurrent: N` limits a client to N simultaneous in-flight requests. Setting to `0` is unlimited. The cap must be ≤ `proxy.max_concurrent`. Different clients have independent semaphores — a capped batch client never blocks an interactive client.
 
-**Management keys:** only keys with `management: true` can call `/queue/pause`, `/queue/resume`, `/queue/drain`, `/queue/flush`. A regular key calling a management endpoint gets 403, not 401 (authenticated but not authorized).
+### Key scopes
+
+`scope` is one ordered axis with three cumulative levels. Each includes everything below it.
+
+| Scope | Read status, summary, metrics, dashboard | Proxy inference to Ollama | Pause / resume / drain / flush |
+|---|---|---|---|
+| `read` | yes | no | no |
+| `inference` *(default)* | yes | yes | no |
+| `management` | yes | yes | yes |
+
+`inference` is the default because it is what every key did before 0.5.0 — an existing config keeps working with no edit.
+
+**`scope: read` is the point of the feature.** Before 0.5.0 there was no key that could not buy GPU time: `management: false` gated the four queue-control endpoints and nothing else, so any credential handed to a status widget also bought inference. A `read` key can see the proxy's own state and nothing upstream — it is refused at `/api/generate`, and also at cheap metadata reads like `/api/tags`, so the rule is "read sees the proxy, not Ollama" with no per-path exceptions to remember.
+
+A valid key that is not authorized gets **403**, not 401 — authenticated, but not enough. The refusal names only the scope that was required, never the one the caller holds.
+
+> **Deprecated in 0.5.0: `management: true`.** It still works and maps to `scope: management`, logging a warning at startup that names the `client_id`. Setting **both** `management: true` and a `scope` that is not `management` is a startup error rather than a silent precedence rule — a config that contradicts itself about a privilege should not boot and pick a winner. An explicit `management: false` is not a contradiction with any scope: it is the field's default, so it asserts nothing, and leaving those lines in place while adding `scope:` elsewhere is a supported migration.
+
+> **With `auth.enabled: false` nothing is enforced.** No key is presented, so there is no scope to check — the same caveat that has always applied to `management`, now covering `scope` too. Every endpoint is open to anyone who can reach the port.
 
 **MCP consumer support:** [jobsearch-mcp](https://github.com/TadMSTR/jobsearch-mcp) and [searxng-mcp](https://github.com/TadMSTR/searxng-mcp) both read `OLLAMA_API_KEY` from their environment and forward it as a Bearer token on all outgoing Ollama requests. Point them at the proxy and set their `OLLAMA_API_KEY` to their assigned key — no code changes required.
 
@@ -527,7 +548,108 @@ Every response includes:
 GET /queue/status
 ```
 
-Returns full queue state, host health, per-client stats, routing decisions, and security config.
+Returns full queue state, host health, per-client stats, routing decisions, and security config. The payload is nested — see `/queue/summary` below if you need flat values.
+
+### `GET /queue/summary`
+
+Flat scalars, nothing nested, no identity:
+
+```json
+{
+  "status": "ok",
+  "queued": 0,
+  "active": 1,
+  "max_concurrent": 4,
+  "hosts_healthy": 1,
+  "hosts_total": 1,
+  "processed": 812,
+  "rejected": 0,
+  "expired": 0,
+  "uptime_seconds": 18240
+}
+```
+
+It exists because `/queue/status` cannot drive a status widget. Dashboard widgets map dot-paths to scalars; they cannot sum, filter, or count by predicate. Four of the six things you actually want on a tile are therefore underivable from `/queue/status`: total queued across tiers (three separate per-tier depths), healthy hosts versus total (`hosts` is an array, and counting `healthy: true` needs a predicate), total processed/rejected/expired (per-tier only), and active client count (`clients` is a map keyed by `client_id`).
+
+Every value is a scalar and it carries no `client_id`, no host URL and no key count — it is the response most likely to end up on a wall display. `/queue/status` is unchanged; this is additive.
+
+---
+
+## Dashboard
+
+A self-contained read-only HTML page at `/dashboard`, off by default:
+
+```yaml
+dashboard:
+  enabled: true
+  refresh_seconds: 5
+```
+
+```
+http://localhost:11435/dashboard
+```
+
+It shows headline tiles (queued, active vs max, hosts up, processed, rejected, expired, uptime) and tables for per-tier depths, per-host health, and per-client counts. It polls `/queue/summary` and `/queue/status`, and stops polling while the browser tab is hidden.
+
+- **Read-only.** It exposes no pause, resume, drain or flush control. Those need `management`, and this page is reachable with `read`, so a button would be dead UI for most callers and an escalation for the rest.
+- **Disabled returns 404, not 401** — a feature you have turned off should not advertise itself to someone who cannot use it.
+- **No new dependencies.** One HTML document from one route, inline CSS and JS, no build step and no CDN fetch, so it renders on an air-gapped host.
+- **Not at `/`.** That path is proxied to Ollama, where it answers "Ollama is running"; taking it would break clients that probe the root.
+
+**Reaching it with `auth.enabled: true`.** A browser cannot set an `Authorization` header on a normal navigation, so put the dashboard behind something that supplies the credential — a reverse proxy injecting the header, or a forward-auth layer that sets a session cookie. The page's own polls are same-origin relative requests sent with `credentials: same-origin`, so whatever authenticated the page authenticates them; no key is ever embedded in the HTML. With auth off it simply works in a browser.
+
+---
+
+## Homepage widget
+
+[Homepage](https://gethomepage.dev) can render `/queue/summary` with the built-in `customapi` widget. Issue it a `scope: read` key so the credential in `services.yaml` cannot be used to spend GPU time:
+
+```yaml
+- Ollama Queue Proxy:
+    icon: ollama.png
+    href: http://forge:11435/dashboard
+    widget:
+      type: customapi
+      url: http://forge:11435/queue/summary
+      refreshInterval: 10000
+      headers:
+        Authorization: Bearer {{HOMEPAGE_FILE_OQP_READONLY_KEY}}
+      mappings:
+        - field: queued
+          label: Queued
+          format: number
+        - field: active
+          label: Active
+          format: number
+        - field: hosts_healthy
+          label: Hosts up
+          format: number
+        - field: uptime_seconds
+          label: Uptime
+          format: duration
+```
+
+Notes that will otherwise cost you an afternoon:
+
+- **Homepage substitutes only `{{HOMEPAGE_VAR_*}}` and `{{HOMEPAGE_FILE_*}}`, and the backing variable must carry that prefix.** A bare `${VAR}` is passed through verbatim, so the Bearer token becomes the literal string `${VAR}` and authentication fails. The `FILE_` form pairs with OQP's own `key_file:` — one secret on disk, read by both sides, present in neither config file.
+- `format: duration` expects seconds, which is what `uptime_seconds` is.
+- The `headers:` block is unnecessary when `auth.enabled: false`.
+
+**Per-host list, no extra endpoint.** Homepage's `dynamic-list` display renders an array from the response, so `/queue/status`'s `hosts[]` maps directly:
+
+```yaml
+widget:
+  type: customapi
+  url: http://forge:11435/queue/status
+  display: dynamic-list
+  mappings:
+    items: hosts
+    name: name
+    label: requests_handled
+    format: number
+```
+
+`clients` **cannot** be rendered this way — `dynamic-list` requires an array and `clients` is a map keyed by `client_id`. It is not reshaped to enable this: `/queue/status` is a consumed HTTP surface and stability there is worth more than one widget.
 
 ---
 
@@ -552,14 +674,18 @@ Returns full queue state, host health, per-client stats, routing decisions, and 
 | Endpoint | Auth | Description |
 |----------|------|-------------|
 | `GET /health` | None | Liveness probe — always open |
-| `GET /queue/status` | Token (when enabled) | Full queue, host, client, security state |
-| `GET /metrics` | Token (when enabled) | Prometheus text format |
-| `POST /api/embed` | Token (when enabled) | Native Ollama embedding endpoint |
-| `POST /v1/embeddings` | Token (when enabled) | OpenAI-compat embedding endpoint (see below) |
-| `POST /queue/pause?tier=low` | Management key | Stop accepting requests for tier |
-| `POST /queue/resume?tier=low` | Management key | Resume tier |
-| `POST /queue/drain` | Management key | Wait for queues to empty |
-| `POST /queue/flush?tier=low` | Management key | Drop all pending requests immediately |
+| `GET /queue/status` | `read` | Full queue, host, client, security state (nested) |
+| `GET /queue/summary` | `read` | Flat scalars for a dashboard tile — see below |
+| `GET /metrics` | `read` | Prometheus text format |
+| `GET /dashboard` | `read` | Embedded read-only HTML dashboard; 404 unless enabled |
+| `POST /api/embed` | `inference` | Native Ollama embedding endpoint |
+| `POST /v1/embeddings` | `inference` | OpenAI-compat embedding endpoint (see below) |
+| `POST /queue/pause?tier=low` | `management` | Stop accepting requests for tier |
+| `POST /queue/resume?tier=low` | `management` | Resume tier |
+| `POST /queue/drain` | `management` | Wait for queues to empty |
+| `POST /queue/flush?tier=low` | `management` | Drop all pending requests immediately |
+
+Scopes apply only when `auth.enabled: true`. With auth off, every endpoint above is open.
 
 ### OpenAI-compat embeddings
 
@@ -609,6 +735,10 @@ Delivery is fire-and-forget (5s timeout). Failed deliveries are logged at WARNIN
 
 `max_concurrent` controls how many requests the proxy dispatches to Ollama simultaneously. Set it to match Ollama's `OLLAMA_NUM_PARALLEL` environment variable (Ollama's default is 1; the proxy default of 2 assumes you've set `OLLAMA_NUM_PARALLEL=2` or higher on the Ollama side). They're independent settings — the proxy throttles at the queue layer, Ollama throttles internally. If they're mismatched, requests will either queue unnecessarily or pile up at Ollama.
 
+**Deprecated in 0.5.0:** `auth.keys[].management` is superseded by `auth.keys[].scope`.
+`management: true` still works and maps to `scope: management`, logging a warning at
+startup that names the `client_id`. See [Key scopes](#key-scopes).
+
 **Deprecated in 0.4.0:** `ollama.health_check_interval` drove a second host-health loop
 that no longer exists — `ollama.hosts[].model_sync_interval` is now the only poll
 interval. Setting it logs a warning at startup and has no other effect.
@@ -636,7 +766,7 @@ See [`config.example.yml`](config.example.yml) for the full config with inline d
 
 **Prometheus scraping:**
 
-Add a dedicated scraper key — low priority and capped at 1 concurrent so metrics polling can't displace inference traffic:
+Add a dedicated scraper key with `scope: read`. A scraper only ever reads `/metrics`, so it has no business being able to spend GPU time — and before 0.5.0 there was no way to express that:
 
 ```yaml
 # config.yml
@@ -646,10 +776,10 @@ auth:
     - key: "sk-my-metrics-key"
       client_id: "prometheus-scraper"
       description: "Prometheus metrics scraper"
-      max_priority: low
-      management: false
-      max_concurrent: 1
+      scope: read
 ```
+
+`max_priority` and `max_concurrent` are irrelevant on a `read` key — it never reaches the queue at all.
 
 The recommended Docker pattern is a shared `prometheus-scrape` network so Prometheus reaches OQP by container name — no host port exposure required. Use `authorization.credentials` (not the legacy `bearer_token` field):
 
