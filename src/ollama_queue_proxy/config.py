@@ -323,6 +323,34 @@ class EmbeddingCacheConfig(BaseModel):
     connect_timeout: int = 2
 
 
+class DashboardConfig(BaseModel):
+    """The embedded read-only dashboard.
+
+    There is deliberately no `path` key. The route is registered at import time so that
+    a disabled dashboard can answer 404 itself; left unregistered it would fall through
+    to the proxy catch-all and either be refused as inference or forwarded to Ollama,
+    both of which disclose more than a 404 does. Config is not loaded at import time, so
+    an unconditional registration cannot take a configured path.
+
+    A fixed path also settles the one hard constraint by construction: the dashboard must
+    not take "/", which is in the metadata fast-path list and is proxied to Ollama to
+    answer "Ollama is running". With no key there is no validator to get wrong and no
+    way for an operator to violate it.
+    """
+
+    # Off by default: it fails closed, and a brand-new surface should be opted into
+    # rather than appearing on every deployment that upgrades.
+    enabled: bool = False
+    refresh_seconds: int = 5
+
+    @field_validator("refresh_seconds")
+    @classmethod
+    def positive_refresh(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"dashboard.refresh_seconds must be >= 1 second, got {v}")
+        return v
+
+
 class KeepAliveConfig(BaseModel):
     default: str = "5m"
     override: bool = False
@@ -340,6 +368,7 @@ class Config(BaseModel):
     routing: RoutingConfig = RoutingConfig()
     embedding_cache: EmbeddingCacheConfig = EmbeddingCacheConfig()
     keep_alive: KeepAliveConfig = KeepAliveConfig()
+    dashboard: DashboardConfig = DashboardConfig()
 
     @model_validator(mode="after")
     def validate_v2_constraints(self) -> Config:

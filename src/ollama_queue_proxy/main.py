@@ -31,6 +31,7 @@ from .queue import (
     QueuePaused,
     RequestExpired,
 )
+from .routes.dashboard import router as dashboard_router
 from .routes.queue import router as queue_router
 from .routes.status import router as status_router
 from .routing import RoutingTable
@@ -186,6 +187,10 @@ app = FastAPI(
 app.add_middleware(RequestContextMiddleware)
 app.include_router(status_router)
 app.include_router(queue_router)
+# Registered unconditionally, before the catch-all. Registering it only when enabled
+# would leave /dashboard falling through to the proxy — refused as inference, or
+# forwarded to Ollama — instead of answering the 404 that discloses least.
+app.include_router(dashboard_router)
 
 
 _KEEP_ALIVE_PATHS = frozenset({"/api/generate", "/api/chat", "/api/embed", "/api/embeddings"})

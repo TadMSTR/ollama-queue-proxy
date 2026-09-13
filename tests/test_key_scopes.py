@@ -25,8 +25,9 @@ from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
 from ollama_queue_proxy.auth import AuthManager
-from ollama_queue_proxy.config import ApiKeyConfig
+from ollama_queue_proxy.config import ApiKeyConfig, DashboardConfig
 from ollama_queue_proxy.middleware import RequestContextMiddleware
+from ollama_queue_proxy.routes import dashboard as dashboard_routes
 from ollama_queue_proxy.routes import queue as queue_routes
 from ollama_queue_proxy.routes import status as status_routes
 from tests.conftest import make_config
@@ -52,6 +53,7 @@ GRANTS: dict[str, dict[str, bool]] = {
     "status": {"read": True, "inference": True, "management": True},
     "summary": {"read": True, "inference": True, "management": True},
     "metrics": {"read": True, "inference": True, "management": True},
+    "dashboard": {"read": True, "inference": True, "management": True},
     "inference": {"read": False, "inference": True, "management": True},
     "management": {"read": False, "inference": False, "management": True},
 }
@@ -66,11 +68,16 @@ def build_route_client(keys: list[ApiKeyConfig] | None = None, auth_enabled: boo
     """TestClient over the status + queue routers with a mocked AppState."""
     cfg = make_config(auth_enabled=auth_enabled, keys=keys or list(KEYS.values()))
     cfg.auth.enabled = auth_enabled
+    # Enabled, so the matrix measures the SCOPE gate. Left at its default the dashboard
+    # would 404 for all three scopes and the row would agree with itself while testing
+    # nothing.
+    cfg.dashboard = DashboardConfig(enabled=True)
 
     app = FastAPI()
     app.add_middleware(RequestContextMiddleware)
     app.include_router(status_routes.router)
     app.include_router(queue_routes.router)
+    app.include_router(dashboard_routes.router)
 
     state = MagicMock()
     state.config = cfg
@@ -156,6 +163,8 @@ async def _attempt(surface: str, scope: str) -> int:
         return client.get("/queue/status", headers=headers).status_code
     if surface == "summary":
         return client.get("/queue/summary", headers=headers).status_code
+    if surface == "dashboard":
+        return client.get("/dashboard", headers=headers).status_code
     if surface == "metrics":
         return client.get("/metrics", headers=headers).status_code
     if surface == "management":
@@ -164,7 +173,7 @@ async def _attempt(surface: str, scope: str) -> int:
 
 
 # ---------------------------------------------------------------------------
-# The matrix — 3 scopes x 5 surfaces
+# The matrix — 3 scopes x 6 surfaces
 # ---------------------------------------------------------------------------
 
 
@@ -172,7 +181,7 @@ async def _attempt(surface: str, scope: str) -> int:
 @pytest.mark.parametrize("scope", SCOPES)
 @pytest.mark.asyncio
 async def test_scope_matrix(scope: str, surface: str):
-    """3 scopes x 5 surfaces. Read the GRANTS table above for the expected outcome."""
+    """3 scopes x 6 surfaces. Read the GRANTS table above for the expected outcome."""
     expected_ok = GRANTS[surface][scope]
     code = await _attempt(surface, scope)
     if expected_ok:
@@ -187,7 +196,7 @@ def test_the_matrix_contains_both_outcomes():
     not the code, so it cannot be caught by the parametrised test."""
     cells = [v for row in GRANTS.values() for v in row.values()]
     assert True in cells and False in cells
-    assert len(cells) == 15
+    assert len(cells) == 18
 
 
 # ---------------------------------------------------------------------------
