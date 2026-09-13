@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
+from ..auth import require_scope
+
 if TYPE_CHECKING:
     from ..main import AppState
 
@@ -29,22 +31,14 @@ def _validate_tier(tier: str | None, request_id: str) -> JSONResponse | None:
 
 
 async def _require_management(request: Request) -> JSONResponse | None:
-    """Check that the request has a management-capable key (or auth is disabled)."""
-    state: AppState = request.app.state.oqp
-    key_cfg, err = await state.auth_manager.authenticate(request)
-    if err:
-        return err
-    # With auth disabled there is no key to carry a management flag, so the route is
-    # open — see the auth-off caveat in the README.
-    if state.config.auth.enabled and (key_cfg is None or not key_cfg.management):
-        return JSONResponse(
-            status_code=403,
-            content={
-                "error": "management permission required",
-                "request_id": getattr(request.state, "request_id", "unknown"),
-            },
-        )
-    return None
+    """Check that the request has a management-scoped key (or auth is disabled).
+
+    Delegates to the one shared gate. Before 0.5.0 this read `key_cfg.management`
+    directly; that boolean is now the deprecated spelling of `scope: management` and is
+    reconciled in config.py, so there is nothing left to check here that `allows` does
+    not already answer.
+    """
+    return await require_scope(request, "management")
 
 
 @router.post("/queue/pause")

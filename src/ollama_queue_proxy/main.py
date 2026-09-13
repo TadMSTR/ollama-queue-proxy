@@ -16,10 +16,10 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from .auth import AuthManager
+from .auth import AuthManager, scope_denied
 from .cache import EmbeddingCache
 from .concurrency import ClientConcurrencyManager
-from .config import Config, load_config
+from .config import ApiKeyConfig, Config, load_config
 from .middleware import RequestContextMiddleware, get_client_id, parse_priority
 from .openai_compat import is_openai_compat_path, rewrite_path, wrap_response
 from .proxy import dispatch_request, read_body
@@ -232,12 +232,14 @@ async def _enqueue_request(
     state: AppState,
     reentries: int = 0,
     path_override: str | None = None,
+    key_cfg: ApiKeyConfig | None = None,
 ) -> JSONResponse:
     """
     Buffer the request body, enqueue it, and await dispatch. Used by both the main
     proxy handler and injection port handlers to share queue/worker logic.
 
     Before enqueueing:
+    - Refuses any key below `inference` scope.
     - Injects keep_alive into request body for the four supported endpoints.
     - Checks embedding cache; cache hits bypass the queue entirely.
     After dispatch:
@@ -248,6 +250,34 @@ async def _enqueue_request(
     from .proxy import extract_model
 
     request_id = getattr(request.state, "request_id", "unknown")
+
+    # THE gate that makes `scope: read` mean anything. Every byte that reaches Ollama
+    # passes through this function — the main catch-all and every injection listener
+    # both funnel here, and dispatch_request has no other caller — so this is one
+    # enforcement point rather than one per entry path, and a new entry path cannot
+    # quietly acquire an exemption by forgetting to add a check.
+    #
+    # The rule is simply "if there is a key, its scope is enforced", which lands
+    # correctly on all three paths with no flag to get wrong:
+    #   - main port, auth off  -> key_cfg is None; nothing to enforce (the documented
+    #     auth-off caveat, unchanged from how `management` already behaved)
+    #   - main port, auth on   -> authenticate() always yields a key or an error
+    #   - injection listener   -> key_cfg is ALWAYS a real config entry, resolved from
+    #     `inject_as` at startup and independent of auth.enabled. Enforced there too,
+    #     for the same reason max_priority already is: that identity is declared by the
+    #     operator, not asserted by the caller, so the policy on it is meaningful even
+    #     with auth off. Skipping it would leave a read-only key able to buy inference
+    #     merely by being pointed at a listener port.
+    #
+    # Note the metadata fast-path below is NOT an exception. `read` cannot reach Ollama
+    # at all, not even /api/tags: the rule an operator has to hold in their head is
+    # "read sees the proxy's own state, nothing upstream", and a carve-out for cheap
+    # reads would make it "...except these five paths" for no use case this build has.
+    #
+    # Placed before read_body so an unauthorised request is refused without buffering
+    # its body — the same authorisation-before-input ordering as routes/queue.py.
+    if key_cfg is not None and not key_cfg.allows("inference"):
+        return scope_denied(request, "inference")
 
     body, body_err = await read_body(request, state.config.proxy.max_request_body_mb)
     if body_err:
@@ -450,6 +480,7 @@ async def proxy_handler(request: Request, path: str):
             tier=tier,
             state=state,
             path_override=native_path,
+            key_cfg=key_cfg,
         )
         # Only wrap successful JSON responses; pass through errors unchanged
         if isinstance(response, JSONResponse) and response.status_code == 200:
@@ -463,6 +494,7 @@ async def proxy_handler(request: Request, path: str):
         client_id=client_id,
         tier=tier,
         state=state,
+        key_cfg=key_cfg,
     )
 
 

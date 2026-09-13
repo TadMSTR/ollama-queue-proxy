@@ -79,11 +79,16 @@ def make_injection_app(inject_as: str, key_cfg: ApiKeyConfig) -> FastAPI:
         else:
             tier = requested_priority
 
+        # key_cfg carries the scope as well as the priority ceiling. Passing it is
+        # what stops a `scope: read` key from buying inference simply by being the
+        # `inject_as` target of a listener port, where no Bearer token is presented and
+        # nothing else would ever look at its scope.
         return await _enqueue_request(
             request=request,
             client_id=inject_as,
             tier=tier,
             state=state,
+            key_cfg=key_cfg,
         )
 
     return inj_app

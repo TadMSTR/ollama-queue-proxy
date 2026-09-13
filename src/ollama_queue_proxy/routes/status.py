@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING
 from fastapi import APIRouter, Request
 from fastapi.responses import PlainTextResponse
 
+from ..auth import require_scope
+
 if TYPE_CHECKING:
     from ..main import AppState
 
@@ -26,13 +28,15 @@ async def health():
 
 @router.get("/queue/status")
 async def queue_status(request: Request):
-    state: AppState = request.app.state.oqp
-
-    # Auth check (same as any other endpoint when enabled)
-    _, err = await state.auth_manager.authenticate(request)
+    # `read` is the floor scope, so every key reaches this today. Routed through the
+    # gate anyway: written as a bare authenticate(), a future level below `read` would
+    # silently keep access to the status surface, and that is the failure that does not
+    # announce itself.
+    err = await require_scope(request, "read")
     if err:
         return err
 
+    state: AppState = request.app.state.oqp
     q_mgr = state.queue_manager
     depths = q_mgr.queue_depths()
     stats = q_mgr.stats()
@@ -103,13 +107,12 @@ async def queue_status(request: Request):
 @router.get("/metrics")
 async def metrics(request: Request):
     """Prometheus text exposition format."""
-    state: AppState = request.app.state.oqp
-
-    # Auth mirrors /queue/status
-    _, err = await state.auth_manager.authenticate(request)
+    # Scope mirrors /queue/status.
+    err = await require_scope(request, "read")
     if err:
         return err
 
+    state: AppState = request.app.state.oqp
     q_mgr = state.queue_manager
     depths = q_mgr.queue_depths()
     stats = q_mgr.stats()
