@@ -595,6 +595,7 @@ It shows headline tiles (queued, active vs max, hosts up, processed, rejected, e
 - **Disabled returns 404, not 401** — a feature you have turned off should not advertise itself to someone who cannot use it.
 - **No new dependencies.** One HTML document from one route, inline CSS and JS, no build step and no CDN fetch, so it renders on an air-gapped host.
 - **Not at `/`.** That path is proxied to Ollama, where it answers "Ollama is running"; taking it would break clients that probe the root.
+- **Nonce-based CSP.** The page is sent with `default-src 'none'` and a per-response nonce for its two inline blocks — no `unsafe-inline`, so injected script is refused even if the page's own escaping were bypassed. Also `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` and `X-Frame-Options: DENY`.
 
 **Reaching it with `auth.enabled: true`.** A browser cannot set an `Authorization` header on a normal navigation, so put the dashboard behind something that supplies the credential — a reverse proxy injecting the header, or a forward-auth layer that sets a session cookie. The page's own polls are same-origin relative requests sent with `credentials: same-origin`, so whatever authenticated the page authenticates them; no key is ever embedded in the HTML. With auth off it simply works in a browser.
 

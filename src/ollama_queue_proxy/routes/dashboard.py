@@ -27,6 +27,7 @@ ever written into this page.
 from __future__ import annotations
 
 import json
+import secrets
 from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Request
@@ -55,8 +56,38 @@ async def dashboard(request: Request):
     if err:
         return err
 
+    # A fresh nonce per response, so the CSP below admits exactly the two inline blocks
+    # this file ships and nothing else. Inline CSS and JS are deliberate here — the whole
+    # point is one self-contained document with no build step — and `unsafe-inline` would
+    # have been the easy way to allow them, but it also allows anything an attacker
+    # manages to inject. A nonce keeps the self-containment and still refuses injected
+    # script, which makes the CSP a second, independent barrier behind textContent rather
+    # than a restatement of it.
+    nonce = secrets.token_urlsafe(16)
+    page = _PAGE.replace("__NONCE__", nonce).replace(
+        "__REFRESH_MS__", json.dumps(state.config.dashboard.refresh_seconds * 1000)
+    )
     return HTMLResponse(
-        _PAGE.replace("__REFRESH_MS__", json.dumps(state.config.dashboard.refresh_seconds * 1000))
+        page,
+        headers={
+            # default-src 'none' so anything not named below is refused rather than
+            # inherited. connect-src 'self' is what the page's own polls need; no img,
+            # font or frame source is granted because it uses none.
+            "Content-Security-Policy": (
+                "default-src 'none'; "
+                f"style-src 'nonce-{nonce}'; "
+                f"script-src 'nonce-{nonce}'; "
+                "connect-src 'self'; "
+                "base-uri 'none'; "
+                "form-action 'none'; "
+                "frame-ancestors 'none'"
+            ),
+            "X-Content-Type-Options": "nosniff",
+            "Referrer-Policy": "no-referrer",
+            # This page reports infrastructure state; it has no reason to be in an
+            # iframe, and `frame-ancestors` above does not cover older browsers.
+            "X-Frame-Options": "DENY",
+        },
     )
 
 
@@ -72,7 +103,7 @@ _PAGE = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
 <title>ollama-queue-proxy</title>
-<style>
+<style nonce="__NONCE__">
   :root {
     --bg: #fbfbfa; --fg: #1a1a19; --muted: #6b6b68; --line: #e0e0dd;
     --card: #ffffff; --ok: #2e7d32; --bad: #c62828; --warn: #ef6c00;
@@ -148,7 +179,7 @@ _PAGE = """<!DOCTYPE html>
 <footer>Read-only view. Pause, resume, drain and flush require a management key and are
 not exposed here.</footer>
 
-<script>
+<script nonce="__NONCE__">
 "use strict";
 var REFRESH_MS = __REFRESH_MS__;
 var timer = null;

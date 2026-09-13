@@ -265,3 +265,77 @@ def test_polling_stops_while_the_tab_is_hidden():
 def test_a_non_positive_refresh_interval_is_rejected(bad):
     with pytest.raises(ValueError, match="refresh_seconds"):
         DashboardConfig(refresh_seconds=bad)
+
+
+# ---------------------------------------------------------------------------
+# Content-Security-Policy (baseline OE-03)
+# ---------------------------------------------------------------------------
+#
+# A second, INDEPENDENT barrier behind textContent. If the two agreed — if the CSP were
+# `unsafe-inline` — it would restate the first barrier rather than back it up, and a
+# single escaping mistake would be the whole defence.
+
+
+def _csp() -> str:
+    resp = build_client().get("/dashboard", headers=_auth(READ_KEY))
+    return resp.headers["content-security-policy"]
+
+
+def test_a_csp_is_sent():
+    assert _csp()
+
+
+def test_the_csp_does_not_allow_unsafe_inline():
+    """The easy way to permit this page's own inline blocks also permits anything an
+    attacker injects, which would make the CSP decorative."""
+    csp = _csp()
+    assert "unsafe-inline" not in csp
+    assert "unsafe-eval" not in csp
+
+
+def test_the_csp_defaults_to_none():
+    """Anything not explicitly granted is refused rather than inherited."""
+    assert "default-src 'none'" in _csp()
+
+
+def test_the_inline_blocks_carry_the_nonce_from_the_header():
+    """The nonce is worthless if the header and the document disagree — the page would
+    render blank, and only in a browser, which no test here would otherwise notice."""
+    resp = build_client().get("/dashboard", headers=_auth(READ_KEY))
+    csp, page = resp.headers["content-security-policy"], resp.text
+    nonces = set(re.findall(r"'nonce-([A-Za-z0-9_-]+)'", csp))
+    assert len(nonces) == 1, f"header should carry exactly one nonce, got {nonces}"
+    nonce = nonces.pop()
+    assert page.count(f'nonce="{nonce}"') == 2, "both <style> and <script> must carry it"
+    assert "__NONCE__" not in page, "an unsubstituted placeholder renders the page blank"
+
+
+def test_the_nonce_is_fresh_on_every_response():
+    """A fixed nonce is a permanent allowlist entry for anyone who reads the source."""
+    seen = {re.search(r"'nonce-([A-Za-z0-9_-]+)'", _csp()).group(1) for _ in range(5)}
+    assert len(seen) == 5, f"nonce must not repeat across responses: {seen}"
+
+
+def test_the_page_can_still_reach_its_own_endpoints():
+    """connect-src must permit the same-origin polls, or the CSP silently breaks the
+    dashboard it is protecting."""
+    assert "connect-src 'self'" in _csp()
+
+
+@pytest.mark.parametrize(
+    "header,value",
+    [
+        ("x-content-type-options", "nosniff"),
+        ("referrer-policy", "no-referrer"),
+        ("x-frame-options", "DENY"),
+    ],
+)
+def test_hardening_headers_are_present(header, value):
+    resp = build_client().get("/dashboard", headers=_auth(READ_KEY))
+    assert resp.headers[header] == value
+
+
+def test_framing_is_refused_two_ways():
+    """`frame-ancestors` is the modern control; X-Frame-Options covers browsers that
+    ignore it. This page reports infrastructure state and has no reason to be framed."""
+    assert "frame-ancestors 'none'" in _csp()
