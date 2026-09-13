@@ -16,6 +16,7 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from . import __version__
 from .auth import AuthManager, scope_denied
 from .cache import EmbeddingCache
 from .concurrency import ClientConcurrencyManager
@@ -180,7 +181,10 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="ollama-queue-proxy",
     description="Drop-in HTTP proxy for Ollama with priority queuing, auth, and failover",
-    version="0.2.0",
+    # NOT a literal. This becomes `info.version` in /openapi.json and the heading in the
+    # docs UI, so a stale value here misinforms every API consumer. It was hardcoded
+    # "0.2.0" from v0.3.0 to v0.5.0 and never once bumped.
+    version=__version__,
     lifespan=lifespan,
 )
 

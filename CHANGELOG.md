@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-09-13
+
+Corrects the version the running service reports. No functional change: the proxy behaves exactly as 0.5.0 did. Tracker: vikunja#840.
+
+### Fixed
+
+- **The API advertised `0.2.0` while running `0.5.0`.** `main.py` passed a hardcoded `version="0.2.0"` to `FastAPI(...)`, which becomes `info.version` in `/openapi.json` and the heading in the docs UI. That literal was written at v0.3.0 and never once bumped, so every release from v0.3.0 to v0.5.0 told API consumers it was 0.2.0 — including a 0.5.0 that added key scopes, `/queue/summary` and the embedded dashboard. A client feature-detecting on the advertised version saw a build predating all of it.
+
+- **`__version__` was a release behind.** `src/ollama_queue_proxy/__init__.py` read `0.4.0` on a 0.5.0 tree. It had drifted once before, sitting at `0.3.1` through the v0.3.2 release, and was silently repaired at v0.3.3 rather than being diagnosed.
+
+### Changed
+
+- **The version is now recorded once.** `__init__.py` holds the only version literal in `src/`; `main.py` imports it. `pyproject.toml` keeps the packaging copy, and `tests/test_version_parity.py` asserts the two agree.
+
+  The parity test reads `pyproject.toml` with `tomllib` rather than `importlib.metadata`. Under the editable install CI and local development both use, installed metadata can lag the file until the package is reinstalled — reading it would fail on a stale install rather than on real drift, which is a flapping test, not a gate.
+
+  A second check scans every module under `src/` for a version literal and fails if one appears outside `__init__.py`. That is what stops the fix regressing: re-adding `version="0.2.0"` to `main.py` fails the suite even though the app would still start. Both checks carry explicit non-vacuity controls, since an assertion that cannot fail is the exact defect being fixed here.
+
 ## [0.5.0] - 2026-09-13
 
 Introduces a read-only key scope so a visibility consumer can be credentialed without being handed GPU time, then gives the proxy a self-contained way to show its own state: a flat `GET /queue/summary`, an embedded read-only dashboard, and a documented Homepage widget. Additive — one config key is deprecated, none removed, and a 0.4.0 config runs unchanged. Tracker: vikunja#826 (closes #789).
