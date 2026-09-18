@@ -33,7 +33,7 @@ dev = [
     # nothing on code nobody edited. That measurement is the reason to take it — a
     # green CI run AFTER the pin moves would only prove the two agree, not that the
     # new version had nothing to say.
-    "ruff==0.16.6",
+    "ruff==0.16.7",
     "anyio[trio]>=4.0",
 ]
 
