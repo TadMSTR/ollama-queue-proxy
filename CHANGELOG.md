@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+- **Dependabot `github-actions`: explicit `open-pull-requests-limit: 13` and a narrow
+  `github/codeql-action*` group on both update channels** (vikunja#930). At the default cap of
+  5, `analyze` was never raised while `init` (#24) and `upload-sarif` (#25) arrived split, and
+  #24 failed both Analyze jobs.
+- **Dependabot `uv`: `dev-tools` group.** `dev` is an optional-dependencies extra, which
+  `dependency-type: development` does not match, so ruff arrived on its own.
+
 ## [0.5.1] - 2026-09-13
 
 Corrects the version the running service reports. No functional change: the proxy behaves exactly as 0.5.0 did. Tracker: vikunja#840.

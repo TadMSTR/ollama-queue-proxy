@@ -33,7 +33,18 @@ updates:
     # `ruff` is deliberately pinned exactly (==) in pyproject.toml because
     # `ruff format --check` is a gate; Dependabot will still propose the bump, and
     # taking it stays a decision.
+    #
+    # `dev-dependencies` alone does not batch the tools. Dependabot's "development" type is
+    # uv's `[dependency-groups]` and `[build-system]`, NOT a `[project.optional-dependencies]`
+    # extra, which is what `dev` is here, so ruff arrived as its own PR. `dev-tools` names the
+    # extra's members (scribe's working pattern, vikunja#964). Add a tool here when you add it
+    # to the extra.
+    #
+    # A dependency joins the FIRST group it matches, so `dev-tools` stays above
+    # `dev-dependencies`.
     groups:
+      dev-tools:
+        patterns: ["ruff", "pytest", "pytest-*"]
       dev-dependencies:
         dependency-type: "development"
     ignore:
@@ -52,6 +63,31 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    # EXPLICIT, AND SIZED TO THIS REPO: 13 distinct actions across .github/workflows/, with
+    # codeql-action's subpaths counted once because they are grouped below. That is the most
+    # open PRs this ecosystem can ever need. The default of 5 is not a safe floor: at the cap
+    # Dependabot does not queue the next bump, it never raises it (vikunja#932, #937). That is
+    # how codeql-action/analyze went unraised here while init (#24) and upload-sarif (#25)
+    # filled the cap. Re-count when a workflow adds an action:
+    #
+    #   grep -rhoE 'uses:\s*[^@ ]+' .github/workflows/ \
+    #     | sed -E 's/uses:\s*//; s#^(github/codeql-action)/.*#\1#' | sort -u | wc -l
+    open-pull-requests-limit: 13
+    # codeql-action is a monorepo. init, analyze and upload-sarif must move to the same SHA
+    # together, or CodeQL aborts with a `neutral` conclusion that branch protection does not
+    # block on (vikunja#930, #936). Dependabot bumps each subpath as its own dependency unless
+    # they are grouped, which is how #24 and #25 arrived split, with #24 failing both Analyze
+    # jobs.
+    #
+    # The group is repeated for security updates ON PURPOSE. A group without `applies-to`
+    # covers version updates only, so a single group leaves the security channel able to split
+    # the same set. Narrow, not `*`: one bad action should not hold every other bump behind it.
+    groups:
+      codeql-action:
+        patterns: ["github/codeql-action*"]
+      codeql-action-security:
+        applies-to: security-updates
+        patterns: ["github/codeql-action*"]
     ignore:
       - dependency-name: "*"
         update-types: ["version-update:semver-major"]
