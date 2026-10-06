@@ -4,6 +4,7 @@
 config.yml
 .env
 .env.*
+*.env
 *.key
 *.pem
 
