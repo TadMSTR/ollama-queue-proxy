@@ -37,6 +37,9 @@ def make_injection_app(inject_as: str, key_cfg: ApiKeyConfig) -> FastAPI:
     """
     from .main import _enqueue_request  # imported late to avoid circular import
 
+    # SECURITY[deferred]: same FastAPI >=0.142 OTLP auto-configuration gap as main.py's app;
+    # add telemetry={"auto_configure": False} here too if OTel is ever added.
+    # Ticket: vikunja#1036 (id 1119). Audit: 2026-10-07/dependabot-sweep-2026-10-p4-deferred-majors.
     inj_app = FastAPI(
         title=f"ollama-queue-proxy injection ({inject_as})",
         lifespan=_null_lifespan,

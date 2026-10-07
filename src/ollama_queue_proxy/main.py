@@ -178,6 +178,12 @@ async def lifespan(app: FastAPI):
     logger.info("shutdown: complete")
 
 
+# SECURITY[deferred]: FastAPI >=0.142 auto-configures OTLP export from OTEL_EXPORTER_OTLP_ENDPOINT
+# at lifespan startup and attaches it to any installed provider without deduplicating. Latent
+# here: no OTel SDK is installed and the deployed compose sets no endpoint. If OTel is ever
+# added, pass telemetry={"auto_configure": False} to BOTH FastAPI(...) calls (this one and
+# injection.py) in the same change, as webhook-doorman#37 did. Target: with any OTel work.
+# Ticket: vikunja#1036 (id 1119). Audit: 2026-10-07/dependabot-sweep-2026-10-p4-deferred-majors.
 app = FastAPI(
     title="ollama-queue-proxy",
     description="Drop-in HTTP proxy for Ollama with priority queuing, auth, and failover",
