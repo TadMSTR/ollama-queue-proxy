@@ -13,4 +13,4 @@
 # This drifted twice before the check existed: `__version__` stuck at 0.3.1 through
 # v0.3.2, and at 0.4.0 through v0.5.0, while `main.py` advertised 0.2.0 to every
 # OpenAPI consumer from v0.3.0 onward without ever being bumped.
-__version__ = "0.5.1"
+__version__ = "0.5.2"

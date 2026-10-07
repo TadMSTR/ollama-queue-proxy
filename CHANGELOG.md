@@ -2,7 +2,21 @@
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-10-07
+
+Dependency release. Picks up fastapi 0.142.2 for the published image. p2 of
+dependabot-sweep-2026-10 released nothing here, so the Dependabot config changes below ship
+in this release too.
+
 ### Changed
+- **fastapi 0.141.1 → 0.142.2** (#30). 0.x minor (vikunja#746). It brings `opentelemetry-api`
+  in as a base dependency of fastapi. That's the API stubs only: there's no SDK or exporter
+  here, and the deployed compose sets no `OTEL_EXPORTER_OTLP_ENDPOINT`, so 0.142's new native
+  telemetry stays inactive. 352 tests pass. The release Trivy gate (`HIGH,CRITICAL
+  --ignore-unfixed`) was pre-checked on the built image and exits 0.
+- **CI actions:** actions/checkout 6.0.2 → 6.1.0, docker/setup-qemu-action 4.3.0 → 4.4.0,
+  docker/setup-buildx-action 4.3.0 → 4.4.1, and the codeql-action group (3 updates, #31).
+  ruff 0.16.6 → 0.16.10 (dev only, #29).
 - **Dependabot `github-actions`: explicit `open-pull-requests-limit: 13` and a narrow
   `github/codeql-action*` group on both update channels** (vikunja#930). At the default cap of
   5, `analyze` was never raised while `init` (#24) and `upload-sarif` (#25) arrived split, and
