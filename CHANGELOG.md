@@ -2,6 +2,37 @@
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-11-06
+
+Security release. Upgrade if your embedding-cache `backend` URL carries a password.
+
+### Security
+- **The embedding-cache backend URL is no longer logged with its credentials.** On every
+  successful connect, the `embedding_cache.connected` INFO line printed `backend` verbatim,
+  so a `redis://:<password>@host:port/db` URL put the password in the container log (and in
+  any log pipeline collecting it). The `FATAL:` stderr message on a failed startup echoed
+  the same URL. Both now go through `redact_backend_url()`, which keeps scheme, host, port
+  and db and drops the userinfo, every other query parameter (redis-py accepts
+  `?password=`) and the fragment. The userinfo ends at the last `@` before the first `?` or
+  `#`, so a password with an unencoded `/` or `@` is still removed. If any `@` is left after
+  that (in a query value such as `?password=a@b`, in the fragment, or after a `?`/`#` inside
+  the password), the URL is ambiguous and is logged as `scheme://<redacted>`.
+- **The `FATAL:` message no longer quotes arbitrary exception text.** redis-py's own errors
+  (which name only host:port or the socket path) are still shown. Any other exception, such
+  as urllib's `ValueError` for a bad port, which quotes the port fragment of a malformed URL
+  and so can carry part of a password, is reduced to its type. The redis-py text is withheld
+  too, and the message says to percent-encode the password, whenever the URL isn't clean:
+  when the redacted form has no host (`<redacted>`, or a URL that doesn't start with a valid `scheme://`, which redis-py
+  still parses for `unix:` and uses the whole remainder, userinfo included, as the socket
+  path), or when the userinfo has spilled into what redis-py reads as host, port or path
+  (the text before the URL's last `@` is not the userinfo the URL parser found, as with a
+  password holding `@` then `/`).
+- **certifi:** the lockfile now pins 2026.10.23 (PYSEC-2026-4320, fixed in 2026.10.18). The
+  image and CI don't install from the lockfile; they resolve the newest certifi at build
+  time, which already includes the fix.
+- If you ran 0.5.2 or earlier with a password in the backend URL, treat that password as
+  exposed to whatever stores your container logs, and rotate it after upgrading.
+
 ## [0.5.2] - 2026-10-07
 
 Dependency release. Picks up fastapi 0.142.2 for the published image. p2 of
