@@ -146,6 +146,9 @@ SECRET = "s3cret"
         ("redis://:s3?cret@valkey:6379/0", "redis://valkey:6379/0"),
         ("redis://:s3#cret@valkey:6379/0", "redis://valkey:6379/0"),
         ("redis://:s3@cret@valkey:6379/0", "redis://valkey:6379/0"),
+        ("redis://:s3/?cret@valkey:6379/0", "redis://valkey:6379/0"),
+        ("redis://:s3%40cret@valkey:6379/0", "redis://valkey:6379/0"),
+        ("redis://u:s3/?c#r%40et@valkey:6379/0?db=1#x", "redis://valkey:6379/0?db=1"),
         # not a URL at all: say nothing about it
         ("s3cret", "<unrecognised backend URL>"),
     ],
