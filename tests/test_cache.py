@@ -160,6 +160,9 @@ SECRET = "s3cret"
         ("redis://valkey:6379/0#frag@s3cret", "redis://<redacted>"),
         # not a URL at all: say nothing about it
         ("s3cret", "<unrecognised backend URL>"),
+        # no real "://", and the password holds one: the text before it is not a scheme
+        ("unix::s3://cret@/run/x.sock", "<unrecognised backend URL>"),
+        ("redis::s3://cret@valkey:6379/0", "<unrecognised backend URL>"),
     ],
 )
 def test_redact_backend_url(url, expected):
@@ -343,7 +346,7 @@ async def test_startup_failure_unix_without_slashes_withholds_detail(url, capsys
 # separator in every position redis-py reads a password from, on every scheme.
 # ---------------------------------------------------------------------------
 
-_SEPARATORS = ["", "/", "?", "#", "@", ":", "%40", "/?", "@/", "/@", "?@", "#@", "@?", "@#"]
+_SEPARATORS = ["", "/", "?", "#", "@", ":", "%40", "/?", "@/", "/@", "?@", "#@", "@?", "@#", "://"]
 _HEAD, _TAIL = "HEADPART", "TAILPART"
 
 

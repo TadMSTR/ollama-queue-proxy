@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import time
 from urllib.parse import parse_qs, urlsplit
 
@@ -27,6 +28,9 @@ misses: dict[str, int] = {}
 errors: dict[str, int] = {}
 
 
+_SCHEME_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*")
+
+
 def redact_backend_url(url: str) -> str:
     """Return the backend URL with credentials removed, for logs and error messages.
 
@@ -41,7 +45,9 @@ def redact_backend_url(url: str) -> str:
       is replaced with ``<redacted>`` rather than guessing a host.
     """
     scheme, sep, rest = url.partition("://")
-    if not sep:
+    # A "scheme" that isn't one means the first "://" sits inside the userinfo of a URL
+    # written without one (redis-py still parses "unix:..."), so it can hold password text.
+    if not sep or not _SCHEME_RE.fullmatch(scheme):
         return "<unrecognised backend URL>"
     cut = min((i for i in (rest.find("?"), rest.find("#")) if i != -1), default=len(rest))
     location, tail = rest[:cut], rest[cut:]
