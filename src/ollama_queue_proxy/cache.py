@@ -32,19 +32,43 @@ def redact_backend_url(url: str) -> str:
 
     Keeps scheme, host, port and db (path, or the ``db`` query parameter); drops the
     userinfo, every other query parameter (redis-py accepts ``?password=``) and the
-    fragment. Works on the raw string rather than ``urlsplit``: a password with an
-    unencoded ``/``, ``?`` or ``#`` ends the netloc early, so everything up to the LAST
-    ``@`` is treated as userinfo.
+    fragment. Works on the raw string rather than ``urlsplit``, whose netloc ends early
+    when a password holds an unencoded ``/``:
+
+    - the userinfo boundary is the LAST ``@`` before the first ``?`` or ``#``;
+    - if an ``@`` is left anywhere after that (in the query, the fragment, or past a
+      ``?``/``#`` inside the password), the split is ambiguous and the whole location
+      is replaced with ``<redacted>`` rather than guessing a host.
     """
     scheme, sep, rest = url.partition("://")
     if not sep:
         return "<unrecognised backend URL>"
-    rest = rest.rpartition("@")[2]
-    rest, _, query = rest.partition("?")
-    rest = rest.partition("#")[0]
-    db = parse_qs(query.partition("#")[0]).get("db", [""])[0]
+    cut = min((i for i in (rest.find("?"), rest.find("#")) if i != -1), default=len(rest))
+    location, tail = rest[:cut], rest[cut:]
+    location = location.rpartition("@")[2]
+    if "@" in location or "@" in tail:
+        return f"{scheme}://<redacted>"
+    query = tail[1:].partition("#")[0] if tail.startswith("?") else ""
+    db = parse_qs(query).get("db", [""])[0]
     suffix = f"?db={db}" if db.isdigit() else ""
-    return f"{scheme}://{rest}{suffix}"
+    return f"{scheme}://{location}{suffix}"
+
+
+def _userinfo_bled(url: str) -> bool:
+    """True when the URL's userinfo may have spilled into what redis-py parses as host,
+    port or path: the raw text before the LAST ``@`` after ``://`` is not exactly the
+    userinfo ``urlsplit`` found (it stops the netloc at the first ``/``, ``?`` or ``#``).
+    A password holding ``@`` then ``/`` keeps an ``@`` in the netloc, so "is there an
+    ``@`` in the netloc" is not enough.
+    """
+    after = url.partition("://")[2]
+    if "@" not in after:
+        return False
+    try:
+        netloc = urlsplit(url).netloc
+    except ValueError:
+        return True
+    return netloc.rpartition("@")[0] != after.rpartition("@")[0]
 
 
 def _startup_error_detail(url: str, exc: Exception) -> str:
@@ -52,14 +76,11 @@ def _startup_error_detail(url: str, exc: Exception) -> str:
 
     redis-py's own errors name only host:port or the socket path. Anything else, such as
     urllib's ``ValueError`` for a bad port, can quote part of a malformed URL, so only
-    the exception type is given. A URL whose ``@`` falls outside the parsed netloc has a
-    password that bled into host, port or path, so even redis-py's text is withheld.
+    the exception type is given. When the userinfo bled into host, port or path
+    (``_userinfo_bled``), even redis-py's host:port can hold password characters, so its
+    text is withheld too.
     """
-    try:
-        bled = "@" in url and "@" not in urlsplit(url).netloc
-    except ValueError:
-        bled = True
-    if bled:
+    if _userinfo_bled(url):
         return (
             f"{type(exc).__name__} (detail withheld: the URL may hold an unencoded "
             "credential; percent-encode reserved characters in the password)"

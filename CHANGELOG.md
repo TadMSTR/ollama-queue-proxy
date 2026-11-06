@@ -13,14 +13,19 @@ Security release. Upgrade if your embedding-cache `backend` URL carries a passwo
   any log pipeline collecting it). The `FATAL:` stderr message on a failed startup echoed
   the same URL. Both now go through `redact_backend_url()`, which keeps scheme, host, port
   and db and drops the userinfo, every other query parameter (redis-py accepts
-  `?password=`) and the fragment. It strips up to the last `@` in the raw string, so a
-  password with an unencoded `/`, `?`, `#` or `@` is removed too.
+  `?password=`) and the fragment. The userinfo ends at the last `@` before the first `?` or
+  `#`, so a password with an unencoded `/` or `@` is still removed. If any `@` is left after
+  that (in a query value such as `?password=a@b`, in the fragment, or after a `?`/`#` inside
+  the password), the URL is ambiguous and is logged as `scheme://<redacted>`.
 - **The `FATAL:` message no longer quotes arbitrary exception text.** redis-py's own errors
   (which name only host:port or the socket path) are still shown. Any other exception, such
   as urllib's `ValueError` for a bad port, which quotes the port fragment of a malformed URL
-  and so can carry part of a password, is reduced to its type. When the URL's `@` falls
-  outside the parsed host (the password bled into host, port or path), even the redis-py
-  text is withheld, and the message says to percent-encode the password.
+  and so can carry part of a password, is reduced to its type. When the userinfo has spilled
+  into what redis-py reads as host, port or path (the text before the URL's last `@` is not
+  the userinfo the URL parser found, as with a password holding `@` then `/`), even the
+  redis-py text is withheld, and the message says to percent-encode the password.
+- **certifi 2026.7.22 → 2026.10.23** in the published image (PYSEC-2026-4320, fixed in
+  2026.10.18).
 - If you ran 0.5.2 or earlier with a password in the backend URL, treat that password as
   exposed to whatever stores your container logs, and rotate it after upgrading.
 

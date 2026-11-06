@@ -143,12 +143,19 @@ SECRET = "s3cret"
         ("redis://valkey:6379/0#s3cret", "redis://valkey:6379/0"),
         # unencoded reserved characters end urlsplit's netloc early; still stripped
         ("redis://:s3/cret@valkey:6379/0", "redis://valkey:6379/0"),
-        ("redis://:s3?cret@valkey:6379/0", "redis://valkey:6379/0"),
-        ("redis://:s3#cret@valkey:6379/0", "redis://valkey:6379/0"),
         ("redis://:s3@cret@valkey:6379/0", "redis://valkey:6379/0"),
-        ("redis://:s3/?cret@valkey:6379/0", "redis://valkey:6379/0"),
         ("redis://:s3%40cret@valkey:6379/0", "redis://valkey:6379/0"),
-        ("redis://u:s3/?c#r%40et@valkey:6379/0?db=1#x", "redis://valkey:6379/0?db=1"),
+        # a '?' or '#' inside the password leaves an '@' past the authority: ambiguous,
+        # so nothing after :// is kept
+        ("redis://:s3?cret@valkey:6379/0", "redis://<redacted>"),
+        ("redis://:s3#cret@valkey:6379/0", "redis://<redacted>"),
+        ("redis://:s3/?cret@valkey:6379/0", "redis://<redacted>"),
+        ("redis://u:s3/?c#r%40et@valkey:6379/0?db=1#x", "redis://<redacted>"),
+        # an '@' inside a query value or the fragment, with no userinfo at all
+        ("redis://valkey:6379/0?password=hunt@s3cret", "redis://<redacted>"),
+        ("redis://valkey:6379/0?username=u&password=p@s3cret&db=0", "redis://<redacted>"),
+        ("unix:///run/valkey.sock?password=a@s3cret&db=2", "unix://<redacted>"),
+        ("redis://valkey:6379/0#frag@s3cret", "redis://<redacted>"),
         # not a URL at all: say nothing about it
         ("s3cret", "<unrecognised backend URL>"),
     ],
@@ -255,6 +262,90 @@ async def test_startup_failure_bled_url_withholds_redis_error_text(capsys):
     assert "ConnectionError" in err
     assert "4242" not in err
     assert SECRET not in err
+
+
+@pytest.mark.asyncio
+async def test_startup_failure_password_with_at_and_slash_withholds_detail(capsys):
+    """A password holding '@' then '/' keeps an '@' in urlsplit's netloc, so a check for
+    "any '@' in the netloc" misses that redis-py's host:port is now password text."""
+    cfg = make_cfg(backend="redis://user:pw@s3cret:1/rest@valkey:6379/0")
+    cache = EmbeddingCache(cfg)
+
+    mock_client = AsyncMock()
+    mock_client.ping.side_effect = RedisConnectionError(
+        "Error 111 connecting to s3cret:1. Connection refused."
+    )
+
+    with patch("redis.asyncio.from_url", return_value=mock_client), pytest.raises(SystemExit):
+        await cache.startup()
+
+    err = capsys.readouterr().err
+    assert "ConnectionError" in err
+    assert "redis://valkey:6379/0" in err
+    assert SECRET not in err
+
+
+# ---------------------------------------------------------------------------
+# Class probe (SC-54): no fragment of a password reaches either output, for every
+# separator in every position redis-py reads a password from, on every scheme.
+# ---------------------------------------------------------------------------
+
+_SEPARATORS = ["", "/", "?", "#", "@", ":", "%40", "/?", "@/", "/@", "?@", "#@", "@?", "@#"]
+_HEAD, _TAIL = "HEADPART", "TAILPART"
+
+
+def _probe_urls():
+    for sep in _SEPARATORS:
+        pw = f"{_HEAD}{sep}{_TAIL}"
+        for scheme in ("redis", "rediss"):
+            yield f"{scheme}://:{pw}@valkey:6379/0"
+            yield f"{scheme}://user:{pw}@valkey:6379/0"
+            yield f"{scheme}://valkey:6379/0?password={pw}"
+            yield f"{scheme}://valkey:6379/0?password={pw}&db=1"
+            yield f"{scheme}://valkey:6379/0#{pw}"
+        yield f"unix://:{pw}@/run/valkey.sock?db=1"
+        yield f"unix:///run/valkey.sock?password={pw}"
+
+
+def _redis_py_failure(url: str) -> Exception:
+    """The exception redis-py would raise connecting to this URL: its real parse, and its
+    real error text shape (format_error_message: host:port or the socket path)."""
+    from redis.asyncio.connection import parse_url
+
+    try:
+        kw = parse_url(url)
+    except ValueError as e:  # urllib's port error and redis-py's own refusals
+        return e
+    where = kw.get("path") or f"{kw.get('host', 'localhost')}:{kw.get('port', 6379)}"
+    return RedisConnectionError(f"Error 111 connecting to {where}. Connection refused.")
+
+
+@pytest.mark.parametrize("url", list(_probe_urls()))
+def test_probe_redact_backend_url_leaks_no_password_fragment(url):
+    out = redact_backend_url(url)
+    assert _HEAD not in out and _TAIL not in out, out
+
+
+@pytest.mark.parametrize("url", list(_probe_urls()))
+@pytest.mark.asyncio
+async def test_probe_startup_outputs_leak_no_password_fragment(url, caplog, capsys):
+    cache = EmbeddingCache(make_cfg(backend=url))
+    ok_client = AsyncMock()
+    ok_client.ping.return_value = True
+    with (
+        caplog.at_level(logging.INFO, logger="ollama_queue_proxy.cache"),
+        patch("redis.asyncio.from_url", return_value=ok_client),
+    ):
+        await cache.startup()
+
+    failing = EmbeddingCache(make_cfg(backend=url))
+    bad_client = AsyncMock()
+    bad_client.ping.side_effect = _redis_py_failure(url)
+    with patch("redis.asyncio.from_url", return_value=bad_client), pytest.raises(SystemExit):
+        await failing.startup()
+
+    for text in (caplog.text, capsys.readouterr().err):
+        assert _HEAD not in text and _TAIL not in text, text
 
 
 # ---------------------------------------------------------------------------
