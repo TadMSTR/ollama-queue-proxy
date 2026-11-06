@@ -13,6 +13,8 @@ from ollama_queue_proxy.cache import (
     EmbeddingCache,
     _embed_key,
     _embeddings_key,
+    _startup_error_detail,
+    _userinfo_bled,
     redact_backend_url,
 )
 from ollama_queue_proxy.config import EmbeddingCacheConfig
@@ -285,6 +287,57 @@ async def test_startup_failure_password_with_at_and_slash_withholds_detail(capsy
     assert SECRET not in err
 
 
+@pytest.mark.parametrize(
+    ("url", "bled"),
+    [
+        ("redis://:s3cret@valkey:6379/0", False),
+        ("redis://valkey:6379/0", False),
+        ("unix:///run/valkey.sock", False),
+        ("unix:/run/valkey.sock", False),  # no "//" but no "@": nothing to leak
+        ("unix::s3cret@/run/x.sock", True),  # no "//" and an "@": fail closed
+        ("unix:s3cret@/run/x.sock", True),
+        ("redis::s3cret@valkey:6379/0", True),
+        ("redis://user:pw@s3cret:1/rest@valkey:6379/0", True),
+    ],
+)
+def test_userinfo_bled(url, bled):
+    assert _userinfo_bled(url) is bled
+
+
+def test_startup_error_detail_withholds_text_when_url_is_not_clean():
+    """Independently of _userinfo_bled: a URL redact_backend_url can't name a host for
+    gets no redis-py text, even when nothing bled."""
+    exc = RedisConnectionError("Error 2 connecting to /run/valkey.sock. No such file.")
+    assert not _userinfo_bled("unix:/run/valkey.sock")
+    assert "withheld" in _startup_error_detail("unix:/run/valkey.sock", exc)
+    assert "No such file" in _startup_error_detail("unix:///run/valkey.sock", exc)
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["unix:s3cret@/run/x.sock", "unix:/:s3cret@/run/x.sock", "unix::s3cret@/run/x.sock?db=0"],
+)
+@pytest.mark.asyncio
+async def test_startup_failure_unix_without_slashes_withholds_detail(url, capsys):
+    """redis-py parses 'unix:' with no '//' and connects to the whole remainder as the
+    socket path, so its real ConnectionError quotes the password."""
+    from redis.asyncio.connection import parse_url
+
+    path = parse_url(url)["path"]
+    assert SECRET in path  # the premise: redis-py really does put it in the path
+    cache = EmbeddingCache(make_cfg(backend=url))
+    bad_client = AsyncMock()
+    bad_client.ping.side_effect = RedisConnectionError(
+        f"Error 2 connecting to {path}. No such file or directory."
+    )
+    with patch("redis.asyncio.from_url", return_value=bad_client), pytest.raises(SystemExit):
+        await cache.startup()
+
+    err = capsys.readouterr().err
+    assert "ConnectionError" in err
+    assert SECRET not in err
+
+
 # ---------------------------------------------------------------------------
 # Class probe (SC-54): no fragment of a password reaches either output, for every
 # separator in every position redis-py reads a password from, on every scheme.
@@ -305,6 +358,17 @@ def _probe_urls():
             yield f"{scheme}://valkey:6379/0#{pw}"
         yield f"unix://:{pw}@/run/valkey.sock?db=1"
         yield f"unix:///run/valkey.sock?password={pw}"
+        # no "//": redis-py still parses these, and a unix: one puts the whole remainder,
+        # userinfo included, into the socket path
+        for scheme, where in (
+            ("redis", "valkey:6379/0"),
+            ("rediss", "valkey:6379/0"),
+            ("unix", "/run/valkey.sock"),
+        ):
+            for slash in ("", "/"):
+                yield f"{scheme}:{slash}:{pw}@{where}"
+                yield f"{scheme}:{slash}{pw}@{where}"
+                yield f"{scheme}:{slash}user:{pw}@{where}?db=0"
 
 
 def _redis_py_failure(url: str) -> Exception:

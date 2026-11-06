@@ -61,7 +61,12 @@ def _userinfo_bled(url: str) -> bool:
     A password holding ``@`` then ``/`` keeps an ``@`` in the netloc, so "is there an
     ``@`` in the netloc" is not enough.
     """
-    after = url.partition("://")[2]
+    scheme_sep, after = url.partition("://")[1:]
+    if not scheme_sep:
+        # No "://": redis-py still parses "unix:..." and "unix:/..." and uses the whole
+        # remainder, userinfo included, as the socket path. Nothing to compare against,
+        # so any "@" fails closed.
+        return "@" in url
     if "@" not in after:
         return False
     try:
@@ -76,11 +81,14 @@ def _startup_error_detail(url: str, exc: Exception) -> str:
 
     redis-py's own errors name only host:port or the socket path. Anything else, such as
     urllib's ``ValueError`` for a bad port, can quote part of a malformed URL, so only
-    the exception type is given. When the userinfo bled into host, port or path
-    (``_userinfo_bled``), even redis-py's host:port can hold password characters, so its
-    text is withheld too.
+    the exception type is given. redis-py's text is withheld too whenever the URL is not
+    clean: ``redact_backend_url`` could not name a host (unrecognised or ``<redacted>``),
+    or the userinfo bled into host, port or path (``_userinfo_bled``). Then redis-py's
+    host:port or socket path can hold password characters.
     """
-    if _userinfo_bled(url):
+    redacted = redact_backend_url(url)
+    unclean = redacted == "<unrecognised backend URL>" or redacted.endswith("://<redacted>")
+    if unclean or _userinfo_bled(url):
         return (
             f"{type(exc).__name__} (detail withheld: the URL may hold an unencoded "
             "credential; percent-encode reserved characters in the password)"
