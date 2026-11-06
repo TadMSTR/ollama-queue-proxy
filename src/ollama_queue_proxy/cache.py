@@ -6,8 +6,10 @@ import hashlib
 import json
 import logging
 import time
+from urllib.parse import parse_qs, urlsplit
 
 import redis.asyncio as aioredis
+from redis.exceptions import RedisError
 
 from .config import EmbeddingCacheConfig
 
@@ -23,6 +25,48 @@ _ERROR_LOG_COOLDOWN = 60.0
 hits: dict[str, int] = {}  # keyed by (client, model, endpoint)
 misses: dict[str, int] = {}
 errors: dict[str, int] = {}
+
+
+def redact_backend_url(url: str) -> str:
+    """Return the backend URL with credentials removed, for logs and error messages.
+
+    Keeps scheme, host, port and db (path, or the ``db`` query parameter); drops the
+    userinfo, every other query parameter (redis-py accepts ``?password=``) and the
+    fragment. Works on the raw string rather than ``urlsplit``: a password with an
+    unencoded ``/``, ``?`` or ``#`` ends the netloc early, so everything up to the LAST
+    ``@`` is treated as userinfo.
+    """
+    scheme, sep, rest = url.partition("://")
+    if not sep:
+        return "<unrecognised backend URL>"
+    rest = rest.rpartition("@")[2]
+    rest, _, query = rest.partition("?")
+    rest = rest.partition("#")[0]
+    db = parse_qs(query.partition("#")[0]).get("db", [""])[0]
+    suffix = f"?db={db}" if db.isdigit() else ""
+    return f"{scheme}://{rest}{suffix}"
+
+
+def _startup_error_detail(url: str, exc: Exception) -> str:
+    """Describe a startup failure without echoing anything that could be a credential.
+
+    redis-py's own errors name only host:port or the socket path. Anything else, such as
+    urllib's ``ValueError`` for a bad port, can quote part of a malformed URL, so only
+    the exception type is given. A URL whose ``@`` falls outside the parsed netloc has a
+    password that bled into host, port or path, so even redis-py's text is withheld.
+    """
+    try:
+        bled = "@" in url and "@" not in urlsplit(url).netloc
+    except ValueError:
+        bled = True
+    if bled:
+        return (
+            f"{type(exc).__name__} (detail withheld: the URL may hold an unencoded "
+            "credential; percent-encode reserved characters in the password)"
+        )
+    if isinstance(exc, RedisError):
+        return f"{type(exc).__name__}: {exc}"
+    return type(exc).__name__
 
 
 def _canonical_json(obj) -> bytes:
@@ -79,11 +123,14 @@ class EmbeddingCache:
                 socket_connect_timeout=self._cfg.connect_timeout,
             )
             await self._client.ping()
-            logger.info("embedding_cache.connected backend=%s", self._cfg.backend)
+            logger.info(
+                "embedding_cache.connected backend=%s", redact_backend_url(self._cfg.backend)
+            )
         except Exception as e:
             print(
                 f"FATAL: embedding cache startup failed — could not connect to "
-                f"'{self._cfg.backend}': {e}. "
+                f"'{redact_backend_url(self._cfg.backend)}': "
+                f"{_startup_error_detail(self._cfg.backend, e)}. "
                 "Fix the backend address or set embedding_cache.enabled: false.",
                 file=sys.stderr,
             )

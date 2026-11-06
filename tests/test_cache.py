@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import logging
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from ollama_queue_proxy.cache import (
     CACHEABLE_PATHS,
     EmbeddingCache,
     _embed_key,
     _embeddings_key,
+    redact_backend_url,
 )
 from ollama_queue_proxy.config import EmbeddingCacheConfig
 
@@ -115,6 +118,140 @@ async def test_startup_succeeds_on_ping_ok():
 
     with patch("redis.asyncio.from_url", return_value=mock_client):
         await cache.startup()  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# Backend URL redaction — the password must never reach a log or stderr
+# ---------------------------------------------------------------------------
+
+SECRET = "s3cret"
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        # password, no username: the shape deployments use
+        ("redis://:s3cret@valkey:6379/0", "redis://valkey:6379/0"),
+        ("redis://user:s3cret@valkey:6379/2", "redis://valkey:6379/2"),
+        ("rediss://default:s3cret@cache.example:6380/0", "rediss://cache.example:6380/0"),
+        ("unix://:s3cret@/run/valkey.sock?db=3", "unix:///run/valkey.sock?db=3"),
+        # no credentials: unchanged
+        ("redis://localhost:6379/0", "redis://localhost:6379/0"),
+        ("unix:///run/valkey.sock", "unix:///run/valkey.sock"),
+        # password as a query parameter (redis-py accepts it); other params dropped
+        ("redis://valkey:6379/0?password=s3cret&db=1", "redis://valkey:6379/0?db=1"),
+        ("redis://valkey:6379/0#s3cret", "redis://valkey:6379/0"),
+        # unencoded reserved characters end urlsplit's netloc early; still stripped
+        ("redis://:s3/cret@valkey:6379/0", "redis://valkey:6379/0"),
+        ("redis://:s3?cret@valkey:6379/0", "redis://valkey:6379/0"),
+        ("redis://:s3#cret@valkey:6379/0", "redis://valkey:6379/0"),
+        ("redis://:s3@cret@valkey:6379/0", "redis://valkey:6379/0"),
+        # not a URL at all: say nothing about it
+        ("s3cret", "<unrecognised backend URL>"),
+    ],
+)
+def test_redact_backend_url(url, expected):
+    assert redact_backend_url(url) == expected
+
+
+@pytest.mark.asyncio
+async def test_connected_log_redacts_password(caplog):
+    cfg = make_cfg(backend=f"redis://:{SECRET}@valkey:6379/0")
+    cache = EmbeddingCache(cfg)
+
+    mock_client = AsyncMock()
+    mock_client.ping.return_value = True
+
+    # Pin the level so the INFO record is produced: the point is that it exists AND is
+    # redacted, not that it was filtered out.
+    with (
+        caplog.at_level(logging.INFO, logger="ollama_queue_proxy.cache"),
+        patch("redis.asyncio.from_url", return_value=mock_client) as from_url,
+    ):
+        await cache.startup()
+
+    # the real URL, password and all, still goes to the client
+    assert from_url.call_args.args[0] == f"redis://:{SECRET}@valkey:6379/0"
+    records = [r for r in caplog.records if "embedding_cache.connected" in r.getMessage()]
+    assert len(records) == 1
+    msg = records[0].getMessage()
+    assert "valkey:6379/0" in msg
+    assert SECRET not in msg
+    assert SECRET not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_startup_failure_stderr_redacts_password(capsys):
+    cfg = make_cfg(backend=f"redis://:{SECRET}@valkey:6379/0")
+    cache = EmbeddingCache(cfg)
+
+    mock_client = AsyncMock()
+    mock_client.ping.side_effect = RedisConnectionError(
+        "Error 111 connecting to valkey:6379. Connection refused."
+    )
+
+    with patch("redis.asyncio.from_url", return_value=mock_client), pytest.raises(SystemExit):
+        await cache.startup()
+
+    err = capsys.readouterr().err
+    assert "FATAL" in err
+    assert "valkey:6379" in err
+    assert "Connection refused" in err  # redis-py's own detail is kept
+    assert SECRET not in err
+
+
+@pytest.mark.asyncio
+async def test_startup_failure_withholds_non_redis_exception_text(capsys):
+    """A non-redis error (e.g. urllib's port ValueError) can quote the URL: type only."""
+    cfg = make_cfg(backend=f"redis://:{SECRET}@valkey:6379/0")
+    cache = EmbeddingCache(cfg)
+
+    with (
+        patch("redis.asyncio.from_url", side_effect=ValueError(f"bad value {SECRET!r}")),
+        pytest.raises(SystemExit),
+    ):
+        await cache.startup()
+
+    err = capsys.readouterr().err
+    assert "ValueError" in err
+    assert SECRET not in err
+
+
+@pytest.mark.asyncio
+async def test_startup_failure_on_malformed_url_leaks_no_password_fragment(capsys):
+    """Real redis-py parse of a password with an unencoded '/': urllib's port error
+    quotes the fragment after the colon. Nothing of the password may reach stderr."""
+    cfg = make_cfg(backend="redis://:pw/s3cret@valkey:6379/0")
+    cache = EmbeddingCache(cfg)
+
+    with pytest.raises(SystemExit):
+        await cache.startup()
+
+    err = capsys.readouterr().err
+    assert "redis://valkey:6379/0" in err
+    assert "pw" not in err.replace("password", "")
+    assert SECRET not in err
+
+
+@pytest.mark.asyncio
+async def test_startup_failure_bled_url_withholds_redis_error_text(capsys):
+    """When the password bled out of the netloc, even redis-py's host:port text can
+    carry part of it (here the digits before the '/'), so the detail is withheld."""
+    cfg = make_cfg(backend="redis://:4242/s3cret@valkey:6379/0")
+    cache = EmbeddingCache(cfg)
+
+    mock_client = AsyncMock()
+    mock_client.ping.side_effect = RedisConnectionError(
+        "Error 111 connecting to localhost:4242. Connection refused."
+    )
+
+    with patch("redis.asyncio.from_url", return_value=mock_client), pytest.raises(SystemExit):
+        await cache.startup()
+
+    err = capsys.readouterr().err
+    assert "ConnectionError" in err
+    assert "4242" not in err
+    assert SECRET not in err
 
 
 # ---------------------------------------------------------------------------
